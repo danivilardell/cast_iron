@@ -1,0 +1,17 @@
+[project]
+name = "ctc"
+version = "0.1.0"
+description = "Covert Timestamped Commitments (CTCs) for coercion-resistant voter self-registration"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["web3>=7", "ecdsa>=0.19"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "python-dotenv>=1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
