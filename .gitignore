@@ -1,0 +1,19 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go work/cache
+.gocache/
+
+# Test artifacts
+/prove_err.txt
+/plots/
+/keys/
+
+# Local tooling
+/bin/
