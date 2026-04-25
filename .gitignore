@@ -12,8 +12,7 @@
 
 # Test artifacts
 /prove_err.txt
-/plots/
-/keys/
+/cast_iron_prover/keys/
 
 # Local tooling
 /bin/

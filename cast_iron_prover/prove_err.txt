@@ -1,0 +1,1 @@
+len(points) != len(scalars)
