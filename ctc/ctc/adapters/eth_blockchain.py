@@ -162,6 +162,10 @@ class EthereumNonceBlockchain(Blockchain):
         R = k * _G
         y_parity = R.y() % 2
 
+        if s_int > _N // 2:
+            s_int = _N - s_int
+            y_parity ^= 1
+
         raw_tx = _encode_signed_eip1559(*tx_args, y_parity=y_parity, r=r_int, s=s_int)
         txhash = self._w3.eth.send_raw_transaction(raw_tx)
 
