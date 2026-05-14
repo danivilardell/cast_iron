@@ -1,12 +1,12 @@
 import pytest
-from ctc.commitment import SHA256Commitment
+from ctc.commitment import SHA3Commitment
 from ctc.adapters.mock_blockchain import MockBlockchain
 from ctc.ctc import CTC
 
 
 @pytest.fixture
 def ctc():
-    instance = CTC(SHA256Commitment(), MockBlockchain())
+    instance = CTC(SHA3Commitment(), MockBlockchain())
     instance.setup()
     return instance
 

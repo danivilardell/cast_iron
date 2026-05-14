@@ -7,7 +7,7 @@ Demonstrates the three-party view:
   - Verifier:  Open succeeds for honest voter, fails for coerced fake
 """
 
-from ctc.commitment import SHA256Commitment
+from ctc.commitment import SHA3Commitment
 from ctc.adapters.mock_blockchain import MockBlockchain
 from ctc.ctc import CTC
 
@@ -17,7 +17,7 @@ def main() -> None:
     # Setup                                                                #
     # ------------------------------------------------------------------ #
     chain  = MockBlockchain()
-    scheme = SHA256Commitment()
+    scheme = SHA3Commitment()
     voter  = CTC(scheme, chain)
     pp = voter.setup()
     print(f"[Setup] public parameters (domain tag): {pp.decode()!r}\n")
@@ -44,7 +44,7 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     leaked = voter.leak()
     print(f"[Leak]   Adversary sees {len(leaked)} transactions.")
-    print(f"         Each 'to' address is a pseudorandom truncation of SHA-256(pp||m||r),")
+    print(f"         Each 'to' address is a pseudorandom truncation of SHA3-256(pp||m||r),")
     print(f"         hiding Alice's credential among {len(leaked)} indistinguishable entries.")
     print(f"         Sample 'to': {leaked[t]['to']}\n")
 

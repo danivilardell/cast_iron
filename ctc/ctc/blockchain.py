@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 Tx = dict[str, Any]
-SeqId = int | tuple[int, int]
+SeqId = int | tuple[int, int] | str
 
 
 class Blockchain(ABC):

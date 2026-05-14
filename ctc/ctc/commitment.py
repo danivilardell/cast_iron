@@ -1,7 +1,7 @@
 """
-Commitment scheme interface and SHA-256 instantiation.
+Commitment scheme interface and SHA3-256 instantiation.
 
-Com.Commit(pp, m, r) = SHA256(len(pp) || pp || len(m) || m || len(r) || r)
+Com.Commit(pp, m, r) = SHA3-256(len(pp) || pp || len(m) || m || len(r) || r)
 
 4-byte big-endian length prefixes for each field prevent collisions between
 different-length inputs that would otherwise produce the same concatenation.
@@ -33,10 +33,10 @@ class CommitmentScheme(ABC):
         """Return True iff Com(pp, m; r) == c."""
 
 
-class SHA256Commitment(CommitmentScheme):
-    """c = SHA256(len(pp) || pp || len(m) || m || len(r) || r)"""
+class SHA3Commitment(CommitmentScheme):
+    """c = SHA3-256(len(pp) || pp || len(m) || m || len(r) || r)"""
 
-    _DOMAIN = b"CTC-SHA256-v1"
+    _DOMAIN = b"CTC-SHA3-256-v1"
 
     def setup(self, security_param: int = 128) -> bytes:
         # pp is a fixed domain-separation tag; security_param is unused here
@@ -44,7 +44,7 @@ class SHA256Commitment(CommitmentScheme):
         return self._DOMAIN
 
     def commit(self, pp: bytes, m: bytes, r: bytes) -> bytes:
-        h = hashlib.sha256()
+        h = hashlib.sha3_256()
         for field in (pp, m, r):
             h.update(len(field).to_bytes(4, "big"))
             h.update(field)
@@ -57,3 +57,6 @@ class SHA256Commitment(CommitmentScheme):
     def sample_randomness(security_param: int = 128) -> bytes:
         """Sample fresh randomness of `security_param` bits."""
         return os.urandom(security_param // 8)
+
+
+SHA256Commitment = SHA3Commitment

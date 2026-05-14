@@ -4,7 +4,7 @@ Ethereum blockchain adapter for the CTC protocol.
 ECDSA-nonce embedding:
   - Commitment c is embedded as the ECDSA signature nonce k in a minimal
     ETH transfer (1 wei to a configurable recipient address).
-  - k = first SHA-256 iteration of c that produces a nonzero scalar mod n.
+    - k = first SHA3-256 iteration of c that produces a nonzero scalar mod n.
   - On-chain, the signature r = (k*G).x mod n encodes c invisibly; an
     observer cannot distinguish this from any other transaction.
   - At opening, the verifier (tallier) recomputes k from c and checks
@@ -54,10 +54,10 @@ def _commitment_to_k(c: bytes) -> int:
     """Derive a nonzero ECDSA nonce k from commitment bytes."""
     digest = c
     while True:
-        k = int.from_bytes(hashlib.sha256(digest).digest(), "big") % _N
+        k = int.from_bytes(hashlib.sha3_256(digest).digest(), "big") % _N
         if k != 0:
             return k
-        digest = hashlib.sha256(digest).digest()
+        digest = hashlib.sha3_256(digest).digest()
 
 
 def _i2b(n: int) -> bytes:

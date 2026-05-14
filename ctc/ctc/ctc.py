@@ -33,9 +33,9 @@ class CTC:
     Parameters
     ----------
     commitment_scheme:
-        Instantiated CommitmentScheme (e.g. SHA256Commitment()).
+        Instantiated CommitmentScheme (e.g. SHA3Commitment()).
     blockchain:
-        Instantiated Blockchain adapter (MockBlockchain or EthereumNonceBlockchain).
+        Instantiated Blockchain adapter (MockBlockchain, EthereumNonceBlockchain, or TronNonceBlockchain).
     security_param:
         Security parameter λ in bits; governs randomness length.
     """

@@ -16,12 +16,12 @@ This breaks the coercion attack: a coercer cannot tell whether a voter has alrea
 The protocol has three operations:
 
 - **Setup** — generates public parameters `pp` (a domain-separation tag).
-- **Commit(m)** — samples randomness `r`, computes `c = SHA256(pp, m, r)`, embeds `c` in a blockchain transaction, and returns a sequence ID `t`. Locally stores `(m, r)`.
+- **Commit(m)** — samples randomness `r`, computes `c = SHA3-256(pp, m, r)`, embeds `c` in a blockchain transaction, and returns a sequence ID `t`. Locally stores `(m, r)`.
 - **Open(m, r, t)** — recomputes `c` from `(m, r)`, retrieves the transaction at `t`, and verifies the embedding. No private key needed for verification.
 
 ### Embedding: ECDSA nonce
 
-Commitment `c` is embedded as the ECDSA signature nonce `k = SHA256(c) mod n` in a minimal (1-wei) Ethereum transfer. On-chain, the signature's `r` value equals `(k·G).x`, invisibly encoding `c`. An observer sees an ordinary ETH transfer with no distinguishing features.
+Commitment `c` is embedded as the ECDSA signature nonce `k = SHA3-256(c) mod n` in a minimal transfer. On-chain, the signature's `r` value equals `(k·G).x`, invisibly encoding `c`. An observer sees an ordinary transfer with no distinguishing features.
 
 **Anonymity set:** every transaction on-chain in a configurable block window — much larger than any transfer-specific set.
 
@@ -37,7 +37,7 @@ The paper's original construction transfers a small amount to an address _derive
 
 2. **Anonymity set size.** Even without the activation problem, the set of USDT transfers to first-time receivers is a small, distinctive subset of chain activity. Any filter over that set immediately halves the candidates for a covert commitment.
 
-ECDSA nonce embedding has neither problem: it works on any EVM chain without chain-level constraints, and its anonymity set is the entire transaction graph.
+ECDSA nonce embedding has neither problem: it works on any chain with compatible ECDSA transfers without chain-level constraints, and its anonymity set is the entire transaction graph.
 
 ### Why not use a hardware wallet?
 
@@ -49,21 +49,22 @@ This requires the CTC signing key to be a software key. That is not a regression
 
 ```
 ctc/
-├── commitment.py          # CommitmentScheme ABC + SHA256Commitment
+├── commitment.py          # CommitmentScheme ABC + SHA3Commitment
 ├── blockchain.py          # Blockchain ABC (embed, post, seq, lookup, filter, verify_embedding)
 ├── ctc.py                 # Π_CTC protocol (setup, commit, leak, open)
 └── adapters/
     ├── mock_blockchain.py  # In-memory mock for tests (fund-transfer style)
-    └── eth_blockchain.py   # Ethereum adapter: ECDSA-nonce embedding via web3.py
+    ├── eth_blockchain.py   # Ethereum adapter: ECDSA-nonce embedding via web3.py
+    └── tron_blockchain.py  # Tron adapter: ECDSA-nonce embedding via TronPy
 ```
 
 ## Usage
 
 ```python
-from ctc import CTC, SHA256Commitment, MockBlockchain
+from ctc import CTC, SHA3Commitment, MockBlockchain
 
 chain = MockBlockchain()
-voter = CTC(SHA256Commitment(), chain)
+voter = CTC(SHA3Commitment(), chain)
 voter.setup()
 
 t = voter.commit(b"credential:alice:abc123")   # post commitment
@@ -72,7 +73,7 @@ assert voter.open_local(t)                      # verify it
 
 For a live demo: `python main.py`
 
-## Ethereum testnet
+## Tron testnet
 
 Set credentials in a `.env` file (never commit this):
 
@@ -85,13 +86,13 @@ ETH_RECIPIENT=<any address, can be same as sender>
 Then:
 
 ```python
-from web3 import Web3
-from ctc import CTC, SHA256Commitment
-from ctc.adapters.eth_blockchain import EthereumNonceBlockchain
+from tronpy import Tron
+from ctc import CTC, SHA3Commitment
+from ctc.adapters.tron_blockchain import TronNonceBlockchain
 
-w3 = Web3(Web3.HTTPProvider("https://sepolia.infura.io/v3/<key>"))
-chain = EthereumNonceBlockchain(w3, signing_key_bytes=bytes.fromhex("<key>"), recipient="0x...")
-voter = CTC(SHA256Commitment(), chain)
+client = Tron(network="nile")
+chain = TronNonceBlockchain(client, signing_key_bytes=bytes.fromhex("<key>"), recipient="T...")
+voter = CTC(SHA3Commitment(), chain)
 voter.setup()
 t = voter.commit(b"my credential")
 ```
@@ -99,10 +100,11 @@ t = voter.commit(b"my credential")
 Run integration tests (requires env vars above):
 
 ```
-pytest tests/test_eth_ctc.py
+pytest tests/test_tron_ctc.py
 ```
 
 ## Dependencies
 
 - `web3>=7` — Ethereum RPC and transaction broadcasting
+- `tronpy>=0.5` — Tron RPC, transaction building, and broadcasting
 - `ecdsa>=0.19` — ECDSA signing with user-supplied nonce `k`
