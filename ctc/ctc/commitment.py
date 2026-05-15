@@ -59,4 +59,3 @@ class SHA3Commitment(CommitmentScheme):
         return os.urandom(security_param // 8)
 
 
-SHA256Commitment = SHA3Commitment

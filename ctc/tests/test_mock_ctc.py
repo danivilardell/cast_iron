@@ -37,18 +37,6 @@ def test_binding_wrong_seq_id(ctc):
     assert ctc.open(record.m, record.r, t + 999) is False
 
 
-def test_leak_anonymity_set(ctc):
-    assert ctc.leak() == []
-    ctc.commit(b"vote:Alice")
-    ctc.commit(b"vote:Bob")
-    leaked = ctc.leak()
-    assert len(leaked) == 2
-    # Addresses must not equal the plaintext messages
-    messages = {b"vote:Alice".hex(), b"vote:Bob".hex()}
-    for tx in leaked:
-        assert tx["to"] not in messages
-
-
 def test_ordering(ctc):
     t0 = ctc.commit(b"vote:Alice")
     t1 = ctc.commit(b"vote:Bob")

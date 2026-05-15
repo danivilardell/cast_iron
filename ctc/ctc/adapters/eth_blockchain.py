@@ -112,8 +112,6 @@ class EthereumNonceBlockchain(Blockchain):
     recipient:
         Address that receives the 1-wei commitment transaction.
         Can be the sender's own address (self-transfer) or any other address.
-    block_window:
-        Number of recent blocks to scan in filter().
     poll_interval:
         Seconds between confirmation polls after broadcasting.
     """
@@ -123,7 +121,6 @@ class EthereumNonceBlockchain(Blockchain):
         w3: Web3,
         signing_key_bytes: bytes,
         recipient: str,
-        block_window: int = 20,
         poll_interval: float = 2.0,
     ) -> None:
         self._w3 = w3
@@ -131,7 +128,6 @@ class EthereumNonceBlockchain(Blockchain):
         self._address = Account.from_key(signing_key_bytes).address
         self._recipient_bytes = bytes.fromhex(Web3.to_checksum_address(recipient)[2:])
         self._chain_id = w3.eth.chain_id
-        self._block_window = block_window
         self._poll_interval = poll_interval
 
     # ------------------------------------------------------------------
@@ -199,20 +195,6 @@ class EthereumNonceBlockchain(Blockchain):
             "sig_r": _extract_r(raw),
             "seq": t,
         }
-
-    def filter(self, pp: bytes) -> list[Tx]:
-        """Return all transactions in the last block_window blocks."""
-        latest = self._w3.eth.block_number
-        results: list[Tx] = []
-        for block_num in range(max(0, latest - self._block_window), latest + 1):
-            block = self._w3.eth.get_block(block_num, full_transactions=True)
-            for idx, raw_tx in enumerate(block["transactions"]):
-                results.append({
-                    "txhash": raw_tx["hash"].hex(),
-                    "sig_r": _extract_r(raw_tx),
-                    "seq": (block_num, idx),
-                })
-        return results
 
     def verify_embedding(self, c: bytes, tx: Tx) -> bool:
         """Check that the commitment c is embedded as the nonce in tx's signature."""

@@ -43,15 +43,5 @@ class Blockchain(ABC):
         """Retrieve a transaction by its sequence identifier."""
 
     @abstractmethod
-    def filter(self, pp: bytes) -> list[Tx]:
-        """Return all transactions in the anonymity set defined by pp."""
-
-    @abstractmethod
     def verify_embedding(self, c: bytes, tx: Tx) -> bool:
-        """
-        Return True iff commitment c is embedded in tx.
-
-        For fund-transfer adapters: checks that tx["to"] equals the address
-        derived from c. For ECDSA-nonce adapters: checks that the signature
-        r value equals (k*G).x where k is derived from c.
-        """
+        """Return True iff commitment c is embedded in tx."""

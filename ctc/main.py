@@ -1,72 +1,69 @@
 """
-End-to-end demo of the CTC protocol using the in-memory mock blockchain.
+CTC demo: commit and open a voting credential over a USDT transfer on the Tron Nile testnet.
 
-Demonstrates the three-party view:
-  - Voter:    Setup → Commit → Open
-  - Adversary: Leak (sees anonymity set, cannot identify registration)
-  - Verifier:  Open succeeds for honest voter, fails for coerced fake
+Required env vars (or .env file):
+  TRON_TESTNET_NODE      — HTTP RPC URL, e.g. https://nile.trongrid.io
+  TRON_PRIVATE_KEY       — 64-hex private key for a funded testnet account
+  TRON_RECIPIENT         — Base58check address to receive the USDT transfer
+  TRON_TRC20_CONTRACT    — USDT contract address on Nile testnet
+  TRON_USDT_AMOUNT       — (optional) transfer amount in token units, default 1
+  TRON_OPEN_DELAY        — (optional) seconds to wait before opening, default 30
 """
 
+import os
+import time
+from pathlib import Path
+
+from dotenv import load_dotenv
+from tronpy import Tron
+from tronpy.providers import HTTPProvider
+
 from ctc.commitment import SHA3Commitment
-from ctc.adapters.mock_blockchain import MockBlockchain
+from ctc.adapters.tron_blockchain import TronTRC20Blockchain
 from ctc.ctc import CTC
+
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 
 def main() -> None:
-    # ------------------------------------------------------------------ #
-    # Setup                                                                #
-    # ------------------------------------------------------------------ #
-    chain  = MockBlockchain()
-    scheme = SHA3Commitment()
-    voter  = CTC(scheme, chain)
-    pp = voter.setup()
-    print(f"[Setup] public parameters (domain tag): {pp.decode()!r}\n")
+    node            = os.environ["TRON_TESTNET_NODE"]
+    private_key_hex = os.environ["TRON_PRIVATE_KEY"]
+    recipient       = os.environ["TRON_RECIPIENT"]
+    contract        = os.environ["TRON_TRC20_CONTRACT"]
+    amount          = int(os.environ.get("TRON_USDT_AMOUNT", "1"))
+    open_delay      = int(os.environ.get("TRON_OPEN_DELAY", "30"))
 
-    # ------------------------------------------------------------------ #
-    # Cover traffic: background activity on the bulletin board             #
-    # ------------------------------------------------------------------ #
-    cover_voter = CTC(scheme, chain)
-    cover_voter._pp = pp  # share public parameters
-    for i in range(5):
-        cover_voter.commit(f"noise-{i}".encode())
-    print(f"[Cover] {chain.ledger_size()} background transactions posted.\n")
+    client = Tron(HTTPProvider(endpoint_uri=node), network="nile")
+    chain  = TronTRC20Blockchain(
+        client,
+        signing_key_bytes=bytes.fromhex(private_key_hex),
+        recipient=recipient,
+        contract_address=contract,
+        amount=amount,
+    )
+    voter = CTC(SHA3Commitment(), chain)
+    voter.setup()
 
-    # ------------------------------------------------------------------ #
-    # Voter self-registers (covertly)                                      #
-    # ------------------------------------------------------------------ #
-    voting_credential = b"credential:alice:abc123"
-    t = voter.commit(voting_credential)
-    print(f"[Commit] Alice commits her voting credential at seq id t={t}")
-    print(f"         Bulletin board now has {chain.ledger_size()} transactions.\n")
+    # --- Commit ---------------------------------------------------------
+    credential = b"credential:alice:abc123"
+    print(f"[Commit] posting commitment for {credential!r} ...")
+    t = voter.commit(credential)
+    print(f"[Commit] confirmed — txid: {t}")
 
-    # ------------------------------------------------------------------ #
-    # Adversary's view via Leak                                            #
-    # ------------------------------------------------------------------ #
-    leaked = voter.leak()
-    print(f"[Leak]   Adversary sees {len(leaked)} transactions.")
-    print(f"         Each 'to' address is a pseudorandom truncation of SHA3-256(pp||m||r),")
-    print(f"         hiding Alice's credential among {len(leaked)} indistinguishable entries.")
-    print(f"         Sample 'to': {leaked[t]['to']}\n")
+    # Opening receipt: what the voter would send to the tallier.
+    m, r = voter.get_opening(t)
+    print(f"[Open]   opening receipt:")
+    print(f"           m = {m!r}")
+    print(f"           r = {r.hex()}")
+    print(f"           t = {t}")
 
-    # ------------------------------------------------------------------ #
-    # Voting phase: Alice opens her commitment to prove prior registration  #
-    # ------------------------------------------------------------------ #
-    valid = voter.open_local(t)
-    print(f"[Open]   Alice opens commitment at t={t}: valid={valid}")
+    # --- Open -----------------------------------------------------------
+    # Give the node a moment to index the transaction before looking it up.
+    print(f"\n[Open]   waiting {open_delay}s for node indexing ...")
+    time.sleep(open_delay)
 
-    # Coerced scenario: adversary tries to open with wrong credential
-    record = voter._store[t]
-    coerced_valid = voter.open(b"credential:alice:FAKE", record.r, t)
-    print(f"[Open]   Adversary tries fake credential at t={t}: valid={coerced_valid}\n")
-
-    # ------------------------------------------------------------------ #
-    # Ordering guarantee                                                    #
-    # ------------------------------------------------------------------ #
-    t_late = voter.commit(b"credential:alice:COERCED")
-    print(f"[Order]  Coerced registration at t={t_late} > honest registration at t={t}.")
-    print(f"         Tallying picks the earliest -> honest registration wins.\n")
-
-    print("Demo complete.")
+    valid = voter.open(m, r, t)
+    print(f"[Open]   commitment valid: {valid}")
 
 
 if __name__ == "__main__":

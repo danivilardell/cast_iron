@@ -2,7 +2,6 @@
 In-memory mock blockchain for testing and local simulation.
 
 Embedding: tx["to"] = c[:20].hex()  (first 20 bytes of commitment)
-Anonymity set: entire ledger.
 Sequence ids: monotonically increasing integers starting at 0.
 """
 
@@ -38,10 +37,6 @@ class MockBlockchain(Blockchain):
         if not isinstance(t, int) or t < 0 or t >= len(self._ledger):
             raise KeyError(f"No transaction at seq id {t!r}")
         return self._ledger[t]
-
-    def filter(self, pp: bytes) -> list[Tx]:
-        # Full ledger is the anonymity set in the mock
-        return list(self._ledger)
 
     def verify_embedding(self, c: bytes, tx: Tx) -> bool:
         return tx["to"] == c[:20].hex()

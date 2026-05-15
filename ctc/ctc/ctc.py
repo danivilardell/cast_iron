@@ -2,9 +2,8 @@
 CTC protocol: Π_CTC^Com(B)
 
 Implements the real CTC protocol from the paper:
-  Setup  → pp
-  Commit(m) → t          (stores (m, r, t) locally; posts tx anonymously)
-  Leak()    → [tx, ...]  (adversary's view: B.Filter(pp))
+  Setup         → pp
+  Commit(m)     → t      (stores (m, r, t) locally; posts tx anonymously)
   Open(m, r, t) → bool  (verify commitment at position t)
 
 The CTC is instantiated by injecting a CommitmentScheme and a Blockchain.
@@ -90,16 +89,6 @@ class CTC:
         self._store[t] = _LocalRecord(m=m, r=r)
         return t
 
-    def leak(self) -> list[Tx]:
-        """
-        Return the adversary's view: all transactions in the anonymity set.
-
-        Corresponds to B.Filter(pp) in the real protocol.
-        """
-        if self._pp is None:
-            raise RuntimeError("Call setup() before leak().")
-        return self._chain.filter(self._pp)
-
     def open(self, m: bytes, r: bytes, t: SeqId) -> bool:
         """
         Verify a commitment.
@@ -122,15 +111,20 @@ class CTC:
         return self._chain.verify_embedding(c, tx)
 
     # ------------------------------------------------------------------
-    # Convenience: open using locally stored (m, r) for a given t
+    # Convenience helpers for local opening
     # ------------------------------------------------------------------
 
-    def open_local(self, t: SeqId) -> bool:
-        """Open the commitment at t using locally stored (m, r)."""
+    def get_opening(self, t: SeqId) -> tuple[bytes, bytes]:
+        """Return (m, r) for seq id t — the data sent to the tallier to open."""
         record = self._store.get(t)
         if record is None:
             raise KeyError(f"No local record for seq id {t!r}.")
-        return self.open(record.m, record.r, t)
+        return record.m, record.r
+
+    def open_local(self, t: SeqId) -> bool:
+        """Open the commitment at t using locally stored (m, r)."""
+        m, r = self.get_opening(t)
+        return self.open(m, r, t)
 
     @property
     def pp(self) -> bytes | None:
