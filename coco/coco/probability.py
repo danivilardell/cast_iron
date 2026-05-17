@@ -293,7 +293,7 @@ def winning_probability_hybrid_grad(
         # bern/f_k recovers the product over K\{k} without recomputing
         for j, k in enumerate(K):
             f_k = q[k] if y_K[j] else (1.0 - q[k])
-            if f_k > 0:
+            if f_k > 1e-300:
                 df_k = 1.0 if y_K[j] else -1.0
                 grad[k] += (bern / f_k) * df_k * clt_val
     return grad

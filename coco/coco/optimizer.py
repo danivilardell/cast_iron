@@ -96,7 +96,7 @@ def _rescale_init(
                 break
             hi *= 2.0
         else:
-            return b_init * hi  # couldn't reach p_target — return best effort
+            return b_init  # can't reach p_target; return unscaled so caller handles infeasibility
         lo = 1.0
         for _ in range(25):
             mid = (lo + hi) / 2.0
@@ -172,8 +172,19 @@ def compute_coco(
             for i in range(n)
         ])
 
+    # Cache last (b, q) pair so the constraint function and its Jacobian
+    # don't recompute q separately when SLSQP evaluates them at the same b.
+    _q_cache: list = [None, None]  # [b.tobytes(), q]
+
+    def _compute_q_cached(b: NDArray) -> NDArray:
+        key = b.tobytes()
+        if _q_cache[0] != key:
+            _q_cache[0] = key
+            _q_cache[1] = _compute_q(b)
+        return _q_cache[1]
+
     def _win_prob(b: NDArray) -> float:
-        q = _compute_q(b)
+        q = _compute_q_cached(b)
         if conditioned:
             return winning_probability_hybrid(q, config.weights, threshold, conditioned)
         return winning_probability(
@@ -214,7 +225,7 @@ def compute_coco(
             "type": "ineq",
             "fun": lambda b, _p=p: _win_prob(b) - _p,
             **({"jac": lambda b: _constraint_jac(
-                    b, _compute_q(b), config, pivots, threshold, conditioned
+                    b, _compute_q_cached(b), config, pivots, threshold, conditioned
                 )} if use_analytical_jac else {}),
         }
 
@@ -230,14 +241,14 @@ def compute_coco(
             )
             if res.success or res.status == 0:
                 wp = _win_prob(res.x)
-                if wp >= p - 1e-4:
+                if wp >= p - 1e-6:
                     return True, res.x, np.sum(res.x)
             return False, res.x, np.inf
 
         # If b_init is already feasible, record it as a candidate.
         # SLSQP can only improve on it; if it fails (e.g. near-degenerate
         # Jacobian for linear pivotality + power-law weights) we fall back here.
-        init_feasible = _win_prob(b_init) >= p - 1e-4
+        init_feasible = _win_prob(b_init) >= p - 1e-6
         best_val = float(np.sum(b_init)) if init_feasible else np.inf
         best_x = b_init.copy() if init_feasible else None
 
@@ -247,12 +258,12 @@ def compute_coco(
 
         # If warm-start solve failed or is infeasible, always retry from a fresh
         # cold start — this breaks cascade propagation when prev_b was bad.
-        need_retry = best_x is None or not ok
+        need_retry = best_x is None or not ok or not init_feasible
         if need_retry:
             b_cold = _cold_start(config)
             if backend in ("auto", "clt"):
                 b_cold = _rescale_init(b_cold, p, _win_prob)
-            cold_feasible = _win_prob(b_cold) >= p - 1e-4
+            cold_feasible = _win_prob(b_cold) >= p - 1e-6
             if cold_feasible and np.sum(b_cold) < best_val:
                 best_x, best_val = b_cold.copy(), float(np.sum(b_cold))
             ok_c, xc, vc = _try_solve(b_cold)
