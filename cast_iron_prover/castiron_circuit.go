@@ -1,15 +1,18 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/consensys/gnark/frontend"
 
 	"github.com/consensys/gnark/std/algebra/native/twistededwards"
 	stdhash "github.com/consensys/gnark/std/hash"
 	"github.com/consensys/gnark/std/math/cmp"
-	poseidonstd "github.com/consensys/gnark/std/permutation/poseidon2"
 	stdEddsa "github.com/consensys/gnark/std/signature/eddsa"
 
 	tedwards "github.com/consensys/gnark-crypto/ecc/twistededwards"
+
+	"cast_iron/shared"
 )
 
 /* ======================= Public ballot container ======================= */
@@ -32,9 +35,10 @@ type BallotCiphertexts struct {
 	// B2 choices encrypted (one-hot * weight)
 	ChoiceC []ElGamalCiphertext
 
-	// Encrypted proofs and indices
+	// Encrypted proofs and indices.  The registration Merkle path (PathRegC)
+	// is gone: registration validity is attested by the voter opening proofs
+	// through the CReg accumulator (see RegOk / CReg below).
 	PosRegC     ElGamalCiphertext
-	PathRegC    []ElGamalCiphertext
 	LeafIndexC  ElGamalCiphertext
 	PathWeightC []ElGamalCiphertext
 
@@ -100,6 +104,12 @@ type CastIronCircuit struct {
 	// Phase 1 Output: per-ballot validity (secret)
 	ValidityBits []frontend.Variable `gnark:",secret"`
 
+	// RegOk[i] (secret, one bit per ballot): 1 iff ballot i's registration
+	// commitment opens correctly.  It replaces the in-circuit registration
+	// Merkle check; the bit is attested by the tallier-side opening circuit
+	// (circuit 2), which is linked to this circuit only through CReg.
+	RegOk []frontend.Variable `gnark:",secret"`
+
 	// Phase 2 Outputs:
 	// A2 = Filtered ballots (v_i · decrypted, secret)
 	FilteredBallots []FilteredBallot `gnark:",secret"`
@@ -111,41 +121,57 @@ type CastIronCircuit struct {
 	// Phase 2 Final Output: Tally vector (public)
 	// T[j] = total votes for choice j (sum over all kept ballots)
 	Tally []frontend.Variable `gnark:",public"`
+
+	// CReg (public): Fiat–Shamir product accumulator over *every* ballot,
+	//   CReg = ∏_i (Poseidon(tupleHash_i, RegOk[i]) + alphaReg),
+	//   tupleHash_i = Poseidon(regTupleDomainTag, pkAx_i, pkAy_i, posReg_i, H(B3_i)),
+	//   alphaReg    = Poseidon(tagCRegAlpha, ElectionID, VoterRollRoot, RegistrationRoot).
+	// tupleHash_i is exactly the TupleHash public input of the voter opening
+	// circuit (voteropening/circuit.go) with Dom = regTupleDomainTag.
+	CReg frontend.Variable `gnark:",public"`
+}
+
+// The registration tuple hash, the CReg accumulator, the ElGamal gadgets and
+// the Poseidon2 instance live in package shared so that this circuit and the
+// audit circuit (auditcircuit/) cannot drift apart.
+const (
+	regTupleDomainTag = shared.RegTupleDomainTag
+	tagCRegAlpha      = shared.TagCRegAlpha
+)
+
+// NewSkeleton returns an unassigned circuit with all slices sized for
+// compilation: numBallots ballots with numChoices choices and a voter-roll
+// Merkle path of pathWeightLen elements (leaf + siblings).
+func NewSkeleton(numBallots, numChoices, pathWeightLen int) *CastIronCircuit {
+	c := &CastIronCircuit{}
+	c.BulletinBoard = make([]BallotCiphertexts, numBallots)
+	c.ValidityBits = make([]frontend.Variable, numBallots)
+	c.RegOk = make([]frontend.Variable, numBallots)
+	c.FilteredBallots = make([]FilteredBallot, numBallots)
+	c.SortedByVoterBallots = make([]SortedByVoterBallot, numBallots)
+	c.Tally = make([]frontend.Variable, numChoices)
+	for i := range c.BulletinBoard {
+		c.BulletinBoard[i].ChoiceC = make([]ElGamalCiphertext, numChoices)
+		c.BulletinBoard[i].PathWeightC = make([]ElGamalCiphertext, pathWeightLen)
+		c.FilteredBallots[i].Choice = make([]frontend.Variable, numChoices)
+		c.SortedByVoterBallots[i].Choice = make([]frontend.Variable, numChoices)
+	}
+	return c
 }
 
 /* ============================== ElGamal helpers ============================= */
-
-const (
-	poseidonWidth         = 2
-	poseidonFullRounds    = 6
-	poseidonPartialRounds = 50
-)
-
-const elgamalExpBits = 254
+// (shared with the audit circuit, see package shared)
 
 func expByBits(api frontend.API, base, exp frontend.Variable) frontend.Variable {
-	bits := api.ToBinary(exp, elgamalExpBits)
-	result := frontend.Variable(1)
-	basePow := base
-	for _, bit := range bits {
-		mul := api.Mul(result, basePow)
-		result = api.Select(bit, mul, result)
-		basePow = api.Mul(basePow, basePow)
-	}
-	return result
+	return shared.ExpByBits(api, base, exp)
 }
 
 func elgamalDecryptScalar(api frontend.API, c1, c2, sk frontend.Variable) frontend.Variable {
-	shared := expByBits(api, c1, sk)
-	return api.Mul(c2, api.Inverse(shared))
+	return shared.ElGamalDecryptScalar(api, c1, c2, sk)
 }
 
 func newPoseidonHasher(api frontend.API) stdhash.FieldHasher {
-	perm, err := poseidonstd.NewPoseidon2FromParameters(api, poseidonWidth, poseidonFullRounds, poseidonPartialRounds)
-	if err != nil {
-		panic(err)
-	}
-	return stdhash.NewMerkleDamgardHasher(api, perm, 0)
+	return shared.NewPoseidonHasher(api)
 }
 
 /* ============================== Messages ============================== */
@@ -283,51 +309,9 @@ func voterRollBit(
 	return api.Mul(leafOk, rootOk)
 }
 
-// registrationInclusionBit: 1 iff registration Merkle verifies.
-// expectedLeaf = Poseidon(tag=0, posReg, Poseidon(b3Rx,b3Ry,b3S))
-// SOFT verification: returns 0/1 without asserting
-func registrationInclusionBit(
-	api frontend.API,
-	root frontend.Variable,
-	path []frontend.Variable,
-	posReg frontend.Variable,
-	b3Rx, b3Ry, b3S frontend.Variable,
-) frontend.Variable {
-	// H(B3)
-	hSig := newPoseidonHasher(api)
-	hSig.Write(b3Rx, b3Ry, b3S)
-	b3Hash := hSig.Sum()
-
-	// expected leaf = Poseidon(0, posReg, H(B3))
-	hLeaf := newPoseidonHasher(api)
-	hLeaf.Write(0, posReg, b3Hash)
-	computedLeaf := hLeaf.Sum()
-
-	// path[0] should be the leaf (this matches gnark-crypto proofs)
-	leafOk := eqBit(api, path[0], computedLeaf)
-
-	// start folding from the actual leaf
-	h := newPoseidonHasher(api)
-	sum := path[0]
-
-	// IMPORTANT CHANGE: use len(path) bits, not len(path)-1
-	depth := len(path)
-	if depth > 0 {
-		// we need as many bits as levels we’re going to walk
-		binIndex := api.ToBinary(posReg, depth)
-		for i := 1; i < len(path); i++ {
-			// if the i-1'th bit is 1, sibling is on the left; otherwise on the right
-			left := api.Select(binIndex[i-1], path[i], sum)
-			right := api.Select(binIndex[i-1], sum, path[i])
-
-			h.Reset()
-			h.Write(left, right)
-			sum = h.Sum()
-		}
-	}
-
-	rootOk := eqBit(api, sum, root)
-	return api.Mul(leafOk, rootOk)
+// regTupleHash is shared.RegTupleHash (kept as a local alias for readability).
+func regTupleHash(api frontend.API, pkAx, pkAy, posReg, hB3 frontend.Variable) frontend.Variable {
+	return shared.RegTupleHash(api, pkAx, pkAy, posReg, hB3)
 }
 
 // eddsaVerifyBit: soft EdDSA verify over BN254 Edwards.
@@ -431,8 +415,16 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 		}
 	}
 
+	if len(c.RegOk) != n {
+		return fmt.Errorf("RegOk must have one entry per ballot (got %d, want %d)", len(c.RegOk), n)
+	}
+
 	// Global key relation (soft): okKey = 1 iff H == G^sk
 	okKey := eqBit(api, expByBits(api, c.ElGamalG, c.ElGamalSk), c.ElGamalH)
+
+	// Registration-opening accumulator: challenge from the public context.
+	alphaReg := shared.CRegAlpha(api, c.ElectionID, c.VoterRollRoot, c.RegistrationRoot)
+	cregAcc := frontend.Variable(1)
 
 	/* ======================= Decrypt Once & Process ======================= */
 	// Decrypt all ballots once, then use for both validity checks and filtering
@@ -478,13 +470,16 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 		for j := range ct.PathWeightC {
 			pathWeightDec[j] = elgamalDecryptScalar(api, ct.PathWeightC[j].C1, ct.PathWeightC[j].C2, c.ElGamalSk)
 		}
-		pathRegDec := make([]frontend.Variable, len(ct.PathRegC))
-		for j := range ct.PathRegC {
-			pathRegDec[j] = elgamalDecryptScalar(api, ct.PathRegC[j].C1, ct.PathRegC[j].C2, c.ElGamalSk)
-		}
-
 		okVoterRoll := voterRollBit(api, c.VoterRollRoot, pathWeightDec, leafIndexDec, pkAx, pkAy, weightDec)
-		okReg := registrationInclusionBit(api, c.RegistrationRoot, pathRegDec, posRegDec, b3Rx, b3Ry, b3S)
+
+		// Registration opening: H(B3) is hashed once and reused; the opening
+		// itself is proven by the voter and attested through CReg (every
+		// ballot contributes, valid or not).
+		hB3 := shared.HashB3(api, b3Rx, b3Ry, b3S)
+		regOk := c.RegOk[i]
+		api.AssertIsBoolean(regOk)
+		tupleHash := regTupleHash(api, pkAx, pkAy, posRegDec, hB3)
+		cregAcc = shared.CRegStep(api, cregAcc, tupleHash, regOk, alphaReg)
 
 		msgB3 := buildMsgB3(api, c.ElectionID, pkVx, pkVy, pkAx, pkAy)
 		okSigB3 := eddsaVerifyBit(api, curve, sigB3, msgB3, pkAnchor)
@@ -500,7 +495,7 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 			okOneHot,    // exactly one choice
 			okWeight,    // weight matches sum
 			okVoterRoll, // voter roll inclusion
-			okReg,       // registration inclusion
+			regOk,       // registration opening (attested via CReg)
 			okSigB3,     // anchor signature
 			okSigB4,     // vote signature
 		)
@@ -625,6 +620,9 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 
 	// Multiset equality: products must match
 	api.AssertIsEqual(prodA2, prodAstar)
+
+	// Registration-opening accumulator must match the public output.
+	api.AssertIsEqual(cregAcc, c.CReg)
 
 	/* ======================= Phase 2: Deduplication & Tally ======================= */
 	// We are sorted by (pk_anchor, posReg) ASC.

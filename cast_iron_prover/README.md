@@ -52,8 +52,8 @@ Exactly one choice is selected (one-hot times weight). For each c_ij, define z_i
 (C) Weight Consistency + Voter-Roll Inclusion  
 Recompute leaf = MiMC(pk_anchor.X, pk_anchor.Y, weight). Verify Mrk.Ver(Mrk.Root, leaf, pathWeight, leafIndex) using an ordered fold. Enforce Σ_j c_ij = weight.
 
-(D) Registration Commitment  
-B3 is an anchor signature over (eid, pk_vote, pk_anchor). Compute H_B3 = MiMC(B3.Rx, B3.Ry, B3.S) and leaf' = MiMC(0, posReg, H_B3). Verify Mrk'.Ver(Mrk'.Root, leaf', pathReg, posReg) using an ordered fold.
+(D) Registration Opening (RegOk / CReg)  
+B3 is an anchor signature over (eid, pk_vote, pk_anchor). The registration Merkle path is no longer part of the ballot: the voter proves the CTC opening of their registration separately (voteropening/), and the tallier-side opening circuit attests one bit RegOk_i per ballot. This circuit takes RegOk_i as a secret input (asserted boolean) and binds it through the public accumulator CReg = ∏_i (Poseidon(tupleHash_i, RegOk_i) + alphaReg) over *all* ballots, with tupleHash_i = Poseidon(regTupleDomainTag, pk_anchor.X, pk_anchor.Y, posReg, Poseidon(B3.Rx, B3.Ry, B3.S)) (exactly the voter circuit's TupleHash) and alphaReg = Poseidon(tagCRegAlpha, eid, Mrk.Root, Mrk'.Root). RegOk_i enters the validity flag v_i in place of the old Merkle check.
 
 (E) Ballot Signature  
 B4 is a vote signature by pk_vote over (eid, Mrk.Root, Mrk'.Root, B1(keys, posReg), B2(choices, weight), B3(sig)). Verify the EdDSA relation on the BN254 twisted Edwards curve using a MiMC transcript.
@@ -156,3 +156,29 @@ The circuit computes the tally `T` and asserts equality with the public tally in
 
 Given all posted encrypted ballots and public election parameters, the prover knows a secret key sk such that decrypting, validating, ordering, deduplicating per voter, and summing the one-hot weighted choices yields exactly the published tally T. The proof reveals no secret key material, individual votes, or voter-to-ballot linkages beyond what the protocol intentionally makes public.
 """
+
+
+---
+
+## Repository layout and reproduction
+
+| path | contents |
+|---|---|
+| `castiron_circuit.go` | the tallying circuit (circuit 1): decryption, validity checks, `RegOk`/`CReg` accumulator, sorting/multiset check, tally |
+| `castiron_full_test.go`, `castiron_scaling_test.go` | scenario builder, Groth16/PLONK prove-verify harness, the Figure 4 sweep (`TestProverTimePlot`) |
+| `castiron_creg_test.go`, `castiron_cross_test.go` | `RegOk`/`CReg` tests; cross-circuit test (same ballots through circuits 1 and 2 give the same `CReg`) |
+| `shared/` | gadgets both circuits share bit-for-bit (Poseidon2 instance, ElGamal, tuple hash, accumulator, record tree) |
+| `voteropening/` | the voter's CTC opening proof (secp256k1 fixed-base gadget; `results/RESULTS.md`) |
+| `auditcircuit/` | circuit 2, the audit circuit (`RESULTS.md`; `bw6verifier/` = native 2-chain soft verifier prototype) |
+| `plots/` | Figure 4 data and figure (`prover_time_total.csv/.pdf`: tallying + audit proving time per run, MACI reference points; `prover_time.csv/.pdf`: the pre-revision measurement), the plot script, machine description of the cloud runs |
+| `testdata/`, `example_circuits/`, `detect_adv/` | scenario fixtures and standalone examples |
+
+```
+go test ./...                       # correctness tests of all circuits (skips the long benchmarks)
+go test -run TestProverTimePlot -v . # Figure 4 sweep of the tallying circuit (CASTIRON_COUNTS / _LEAVES / _CSV to subset)
+AC_SWEEP=1 go test -run TestProverTimeSweep -v ./auditcircuit/        # audit-circuit prover time vs ballots
+VO_BENCH=1 go test -run TestBenchGroth16 -v ./voteropening/          # voter opening proof benchmark
+python3 plots/plot_prover_time.py plots/prover_time_total.csv plots/prover_time_total.png   # re-render Figure 4
+```
+Benchmarks in the paper were run on an AWS `x2idn.24xlarge` (see `plots/cloud_machine.txt`); `go test ./...` on a
+laptop takes a few minutes (the 50-ballot JSON scenario dominates).

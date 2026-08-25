@@ -23,6 +23,8 @@ import (
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/consensys/gnark/frontend/cs/scs"
 	"github.com/consensys/gnark/test/unsafekzg"
+
+	"cast_iron/shared"
 )
 
 /* ----------------------------- Proof system ----------------------------- */
@@ -164,135 +166,212 @@ circuit registrationInclusionBit does:
 So we build a plain Poseidon Merkle over those leaves and put leaf at path[0].
 */
 func buildPlainMerkleTest(leaves []*big.Int, totalLeaves int) (*big.Int, [][]*big.Int) {
-	if totalLeaves <= 0 {
-		return big.NewInt(0), nil
-	}
-	if totalLeaves < len(leaves) {
-		panic("totalLeaves must be >= number of provided leaves")
-	}
-
-	// build a complete binary tree with treeLeaves = next power of two >= totalLeaves
-	treeLeaves := 1
-	height := 0
-	for treeLeaves < totalLeaves {
-		treeLeaves <<= 1
-		height++
-	}
-
-	type nodeKey struct {
-		level int
-		idx   int
-	}
-
-	leafValues := make(map[int]*big.Int, len(leaves))
-	for idx, leaf := range leaves {
-		leafValues[idx] = leaf
-	}
-
-	defaultNodes := make([]*big.Int, height+1)
-	defaultNodes[0] = poseidonHashFields(big.NewInt(0), big.NewInt(0), big.NewInt(0))
-	for lvl := 1; lvl <= height; lvl++ {
-		defaultNodes[lvl] = poseidonHashFields(defaultNodes[lvl-1], defaultNodes[lvl-1])
-	}
-
-	cache := make(map[nodeKey]*big.Int)
-	var nodeValue func(level, idx int) *big.Int
-	nodeValue = func(level, idx int) *big.Int {
-		key := nodeKey{level: level, idx: idx}
-		if val, ok := cache[key]; ok {
-			return val
-		}
-
-		var out *big.Int
-		if level == 0 {
-			if leaf, ok := leafValues[idx]; ok {
-				out = leaf
-			} else if idx < totalLeaves {
-				// deterministic filler leaf inside the logical tree
-				out = poseidonHashFields(big.NewInt(0), big.NewInt(int64(idx)), big.NewInt(0))
-			} else {
-				out = defaultNodes[0]
-			}
-		} else {
-			size := 1 << level
-			start := idx * size
-			if start >= len(leaves) {
-				out = defaultNodes[level]
-			} else {
-				left := nodeValue(level-1, idx*2)
-				right := nodeValue(level-1, idx*2+1)
-				out = poseidonHashFields(left, right)
-			}
-		}
-
-		cache[key] = out
-		return out
-	}
-
-	root := nodeValue(height, 0)
-
+	root, sib := shared.BuildPlainMerkle(leaves, totalLeaves)
 	proofs := make([][]*big.Int, len(leaves))
 	for i := range leaves {
-		idx := i
-		path := make([]*big.Int, height+1)
-		path[0] = nodeValue(0, idx)
-		for lvl := 0; lvl < height; lvl++ {
-			sibIdx := idx ^ 1
-			path[lvl+1] = nodeValue(lvl, sibIdx)
-			idx >>= 1
-		}
-		proofs[i] = path
+		proofs[i] = append([]*big.Int{leaves[i]}, sib[i]...)
 	}
-
 	return root, proofs
 }
 
-/* ----------------------------- the actual test --------------------------- */
+/* ----------------------------- scenario build ---------------------------- */
 
-func compileCircuit(t testing.TB, scen JSONScenario, ballotExample BallotCiphertexts, pathRegLen, pathWeightLen int, numChoices int, ps ProofSystem) constraint.ConstraintSystem {
+// circuitKeyTag versions the cached proving keys in keys/: keys generated for
+// the pre-CReg circuit are not valid for the current one.
+const circuitKeyTag = "creg1"
+
+// plainBallot is the cleartext content of one ballot (as the circuit decrypts it).
+type plainBallot struct {
+	PkAx, PkAy *big.Int
+	PkVx, PkVy *big.Int
+	PosReg     *big.Int
+	Choices    []*big.Int
+	Weight     *big.Int
+	B3_Rx      *big.Int
+	B3_Ry      *big.Int
+	B3_S       *big.Int
+	B4_Rx      *big.Int
+	B4_Ry      *big.Int
+	B4_S       *big.Int
+}
+
+// scenarioBuild is everything derived from a JSON scenario: the circuit
+// skeleton (for compilation), the full assignment and the expected outputs.
+type scenarioBuild struct {
+	skeleton      *CastIronCircuit
+	assignment    CastIronCircuit
+	numBallots    int
+	numChoices    int
+	expectedTally []frontend.Variable
+
+	eid                    *big.Int
+	voterRootBI, regRootBI *big.Int
+	plain                  []plainBallot
+	validity               []bool     // circuit-computed validity, as expected by the witness views
+	regOk                  []bool     // RegOk[i] supplied to the circuit
+	tupleHashes            []*big.Int // Poseidon(regTupleDomainTag, pkAx, pkAy, posReg, H(B3)) per ballot
+	alphaReg, creg         *big.Int
+}
+
+func compileCircuit(t testing.TB, skeleton *CastIronCircuit, ps ProofSystem) constraint.ConstraintSystem {
 	t.Helper()
-	var circuit CastIronCircuit
-	circuit.BulletinBoard = make([]BallotCiphertexts, len(scen.Voters)*scen.Voters[0].NumRegistrations*scen.Voters[0].Registrations[0].NumBallots)
-	for i := range circuit.BulletinBoard {
-		circuit.BulletinBoard[i].ChoiceC = make([]ElGamalCiphertext, numChoices)
-		circuit.BulletinBoard[i].PathRegC = make([]ElGamalCiphertext, pathRegLen)
-		circuit.BulletinBoard[i].PathWeightC = make([]ElGamalCiphertext, pathWeightLen)
-	}
-	circuit.ValidityBits = make([]frontend.Variable, len(circuit.BulletinBoard))
-	circuit.FilteredBallots = make([]FilteredBallot, len(circuit.BulletinBoard))
-	circuit.SortedByVoterBallots = make([]SortedByVoterBallot, len(circuit.BulletinBoard))
-	for i := 0; i < len(circuit.BulletinBoard); i++ {
-		circuit.FilteredBallots[i].Choice = make([]frontend.Variable, numChoices)
-		circuit.SortedByVoterBallots[i].Choice = make([]frontend.Variable, numChoices)
-	}
-	circuit.Tally = make([]frontend.Variable, numChoices)
-
 	var builder frontend.NewBuilder = r1cs.NewBuilder
 	if ps == Plonk {
 		builder = scs.NewBuilder
 	}
-	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), builder, &circuit)
+	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), builder, skeleton)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ccs
 }
 
-// runScenario runs the full scenario with the default simulatedBlockchainLeaves using Groth16.
-func runScenario(t testing.TB, scen JSONScenario) (time.Duration, time.Duration, int, []frontend.Variable) {
-	proofTimes, verifyTime, numBallots, expectedTally := runScenarioWithBlockchainLeavesProveRepeats(t, scen, simulatedBlockchainLeaves, 1, Groth16)
-	return proofTimes[0], verifyTime, numBallots, expectedTally
+func boolsToVars(bs []bool) []frontend.Variable {
+	out := make([]frontend.Variable, len(bs))
+	for i, b := range bs {
+		if b {
+			out[i] = 1
+		} else {
+			out[i] = 0
+		}
+	}
+	return out
 }
 
-// runScenarioWithBlockchainLeaves runs the full scenario with one prove using Groth16.
-func runScenarioWithBlockchainLeaves(t testing.TB, scen JSONScenario, numBlockchainLeaves int) (time.Duration, time.Duration, int, []frontend.Variable) {
-	proofTimes, verifyTime, numBallots, expectedTally := runScenarioWithBlockchainLeavesProveRepeats(t, scen, numBlockchainLeaves, 1, Groth16)
-	return proofTimes[0], verifyTime, numBallots, expectedTally
+// deriveViews computes the filtered rows (A2), the sorted view (A★) and the
+// expected tally for the given validity flags, applying the same rules as the
+// circuit (invalid rows are zeroed; the first row of every pk_anchor block is kept).
+func deriveViews(plain []plainBallot, validity []bool, eid *big.Int, numChoices int) ([]FilteredBallot, []SortedByVoterBallot, []frontend.Variable) {
+	numBallots := len(plain)
+	filtered := make([]FilteredBallot, numBallots)
+	for i, pb := range plain {
+		filtered[i].Choice = make([]frontend.Variable, numChoices)
+		if validity[i] {
+			filtered[i].Eid = eid
+			filtered[i].PkAnchorX = pb.PkAx
+			filtered[i].PkAnchorY = pb.PkAy
+			filtered[i].PkVoteX = pb.PkVx
+			filtered[i].PkVoteY = pb.PkVy
+			filtered[i].PosReg = pb.PosReg
+			filtered[i].Weight = pb.Weight
+			for j := 0; j < numChoices; j++ {
+				filtered[i].Choice[j] = pb.Choices[j]
+			}
+			filtered[i].B3_RX = pb.B3_Rx
+			filtered[i].B3_RY = pb.B3_Ry
+			filtered[i].B3_S = pb.B3_S
+			filtered[i].B4_RX = pb.B4_Rx
+			filtered[i].B4_RY = pb.B4_Ry
+			filtered[i].B4_S = pb.B4_S
+		} else {
+			zero := big.NewInt(0)
+			filtered[i].Eid = zero
+			filtered[i].PkAnchorX = zero
+			filtered[i].PkAnchorY = zero
+			filtered[i].PkVoteX = zero
+			filtered[i].PkVoteY = zero
+			filtered[i].PosReg = zero
+			filtered[i].Weight = zero
+			for j := 0; j < numChoices; j++ {
+				filtered[i].Choice[j] = zero
+			}
+			filtered[i].B3_RX = zero
+			filtered[i].B3_RY = zero
+			filtered[i].B3_S = zero
+			filtered[i].B4_RX = zero
+			filtered[i].B4_RY = zero
+			filtered[i].B4_S = zero
+		}
+	}
+
+	sorted := make([]SortedByVoterBallot, numBallots)
+	for i := 0; i < numBallots; i++ {
+		sorted[i] = SortedByVoterBallot{
+			Eid:       filtered[i].Eid,
+			PkAnchorX: filtered[i].PkAnchorX,
+			PkAnchorY: filtered[i].PkAnchorY,
+			PkVoteX:   filtered[i].PkVoteX,
+			PkVoteY:   filtered[i].PkVoteY,
+			PosReg:    filtered[i].PosReg,
+			Weight:    filtered[i].Weight,
+			Choice:    append([]frontend.Variable{}, filtered[i].Choice...),
+			B3_RX:     filtered[i].B3_RX,
+			B3_RY:     filtered[i].B3_RY,
+			B3_S:      filtered[i].B3_S,
+			B4_RX:     filtered[i].B4_RX,
+			B4_RY:     filtered[i].B4_RY,
+			B4_S:      filtered[i].B4_S,
+		}
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		ix := sorted[i].PkAnchorX.(*big.Int)
+		jx := sorted[j].PkAnchorX.(*big.Int)
+		if c := ix.Cmp(jx); c != 0 {
+			return c < 0
+		}
+		iy := sorted[i].PkAnchorY.(*big.Int)
+		jy := sorted[j].PkAnchorY.(*big.Int)
+		if c := iy.Cmp(jy); c != 0 {
+			return c < 0
+		}
+		ip := sorted[i].PosReg.(*big.Int)
+		jp := sorted[j].PosReg.(*big.Int)
+		return ip.Cmp(jp) < 0
+	})
+
+	tally := make([]frontend.Variable, numChoices)
+	for j := 0; j < numChoices; j++ {
+		tally[j] = big.NewInt(0)
+	}
+	for i := 0; i < numBallots; i++ {
+		keep := i == 0
+		if i > 0 {
+			xPrev := sorted[i-1].PkAnchorX.(*big.Int)
+			yPrev := sorted[i-1].PkAnchorY.(*big.Int)
+			xCurr := sorted[i].PkAnchorX.(*big.Int)
+			yCurr := sorted[i].PkAnchorY.(*big.Int)
+			keep = xCurr.Cmp(xPrev) != 0 || yCurr.Cmp(yPrev) != 0
+		}
+		if keep {
+			for j := 0; j < numChoices; j++ {
+				cj := sorted[i].Choice[j].(*big.Int)
+				tally[j] = new(big.Int).Add(tally[j].(*big.Int), cj)
+			}
+		}
+	}
+	return filtered, sorted, tally
 }
 
-// runScenarioWithBlockchainLeavesProveRepeats runs the full scenario and executes Prove numProveRepeats times
-// (setup is done once). Returns all proof durations.
-func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario, numBlockchainLeaves, numProveRepeats int, ps ProofSystem) ([]time.Duration, time.Duration, int, []frontend.Variable) {
+// assignmentFor returns a full assignment in which the ballots are treated
+// according to the given validity / RegOk flags (views, tally and CReg are
+// recomputed accordingly).
+func (sb *scenarioBuild) assignmentFor(validity, regOk []bool) CastIronCircuit {
+	filtered, sorted, tally := deriveViews(sb.plain, validity, sb.eid, sb.numChoices)
+	a := sb.assignment
+	a.ValidityBits = boolsToVars(validity)
+	a.RegOk = boolsToVars(regOk)
+	a.FilteredBallots = filtered
+	a.SortedByVoterBallots = sorted
+	a.Tally = tally
+	a.CReg = computeCReg(sb.alphaReg, sb.tupleHashes, regOk)
+	return a
+}
+
+// scenarioOptions tweaks buildScenario.  recordRoot, when set, is used as the
+// public RegistrationRoot (= Mrk.Root(T_R), the record root the audit circuit
+// verifies against) instead of the harness's synthetic registration tree.
+type scenarioOptions struct {
+	recordRoot *big.Int
+}
+
+// buildScenario generates keys, Merkle roots, ballots and the full witness of
+// a scenario.  numBlockchainLeaves sizes the (lazily built) registration tree
+// whose root is the public RegistrationRoot.
+func buildScenario(t testing.TB, scen JSONScenario, numBlockchainLeaves int) *scenarioBuild {
+	return buildScenarioOpts(t, scen, numBlockchainLeaves, scenarioOptions{})
+}
+
+func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int, opts scenarioOptions) *scenarioBuild {
 	t.Helper()
 	if scen.NumChoices <= 0 {
 		t.Fatal("num_choices must be > 0")
@@ -301,13 +380,10 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 	eid := big.NewInt(int64(scen.ElectionID))
 	numChoices := scen.NumChoices
 
-	totalStart := time.Now()
-	phaseStart := time.Now()
-	// 2) ElGamal params
+	// ElGamal params
 	elgSk, elgG, elgH := elgamalKeygen()
-	phaseStart = time.Now()
 
-	// 3) per-voter EdDSA keys
+	// per-voter EdDSA keys
 	type voterKeys struct {
 		anchorSk *eddsa.PrivateKey
 		anchorPk *eddsa.PublicKey
@@ -329,9 +405,8 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 			weight:   big.NewInt(int64(v.Weight)),
 		}
 	}
-	phaseStart = time.Now()
 
-	// 4) build voter-roll Merkle (custom, to match circuit)
+	// voter-roll Merkle (custom, to match circuit)
 	voterLeaves := make([]*big.Int, len(scen.Voters))
 	for i := range scen.Voters {
 		voterLeaves[i] = poseidonHashFields(
@@ -341,9 +416,11 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 		)
 	}
 	voterRootBI, voterProofs := buildUnaryMerkleTest(voterLeaves)
-	phaseStart = time.Now()
 
-	// 5) flatten registrations and build registration Merkle (custom)
+	// registrations: B3 signatures.  The registration tree is still built for
+	// its root (RegistrationRoot is public and part of the B4 message), but its
+	// paths are no longer part of the ballot: registration validity is attested
+	// by the voter opening proofs through RegOk / CReg.
 	type regEntry struct {
 		VoterIdx int
 		RegIdx   int
@@ -353,11 +430,9 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 			S  *big.Int
 		}
 	}
-
 	var regEntries []regEntry
 	for vi, v := range scen.Voters {
 		for ri := range v.Registrations {
-			// B3 message = Poseidon(eid, pkVote, pkAnchor)
 			msgB3 := poseidonHashBytes(
 				eid,
 				fieldToBigInt(allVoters[vi].votePk.A.X),
@@ -365,7 +440,6 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 				fieldToBigInt(allVoters[vi].anchorPk.A.X),
 				fieldToBigInt(allVoters[vi].anchorPk.A.Y),
 			)
-
 			B3_sig, _ := allVoters[vi].anchorSk.Sign(msgB3, hash.POSEIDON2_BN254.New())
 			var B3_R tedwardsCrypto.PointAffine
 			B3_R.SetBytes(B3_sig[:32])
@@ -380,8 +454,6 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 			regEntries = append(regEntries, e)
 		}
 	}
-
-	// build leaves: leaf = Poseidon(0, pos, H(B3)) with pos = index in regEntries
 	regLeaves := make([]*big.Int, len(regEntries))
 	for pos, re := range regEntries {
 		hB3 := poseidonHashFields(re.B3.Rx, re.B3.Ry, re.B3.S)
@@ -390,31 +462,27 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 	if numBlockchainLeaves < len(regLeaves) {
 		t.Fatalf("numBlockchainLeaves (%d) must be >= registrations (%d)", numBlockchainLeaves, len(regLeaves))
 	}
-	regRootBI, regProofs := buildPlainMerkleTest(regLeaves, numBlockchainLeaves)
-	phaseStart = time.Now()
-
-	// 6) build ballots (flatten)
-	var allBallotCts []BallotCiphertexts
-	var ballotValidityFlags []bool
-	var plainBallots []struct {
-		PkAx, PkAy *big.Int
-		PkVx, PkVy *big.Int
-		PosReg     *big.Int
-		Choices    []*big.Int
-		Weight     *big.Int
-		B3_Rx      *big.Int
-		B3_Ry      *big.Int
-		B3_S       *big.Int
-		B4_Rx      *big.Int
-		B4_Ry      *big.Int
-		B4_S       *big.Int
+	regRootBI, _ := buildPlainMerkleTest(regLeaves, numBlockchainLeaves)
+	if opts.recordRoot != nil {
+		regRootBI = opts.recordRoot
 	}
+
+	// ballots
+	var allBallotCts []BallotCiphertexts
+	var validity, regOk []bool
+	var plain []plainBallot
+	var tupleHashes []*big.Int
 
 	for regPos, re := range regEntries {
 		vIdx := re.VoterIdx
 		v := scen.Voters[vIdx]
 		vkeys := allVoters[vIdx]
 		jsonReg := v.Registrations[re.RegIdx]
+		pkAx := fieldToBigInt(vkeys.anchorPk.A.X)
+		pkAy := fieldToBigInt(vkeys.anchorPk.A.Y)
+		pkVx := fieldToBigInt(vkeys.votePk.A.X)
+		pkVy := fieldToBigInt(vkeys.votePk.A.Y)
+		posReg := big.NewInt(int64(regPos))
 
 		for _, jb := range jsonReg.Ballots {
 			// choice vector (one-hot * weight)
@@ -428,19 +496,8 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 			}
 
 			// B4 message (must match circuit buildMsgB4)
-			msgB4Fields := []*big.Int{
-				eid,
-				voterRootBI,
-				regRootBI,
-				fieldToBigInt(vkeys.anchorPk.A.X),
-				fieldToBigInt(vkeys.anchorPk.A.Y),
-				fieldToBigInt(vkeys.votePk.A.X),
-				fieldToBigInt(vkeys.votePk.A.Y),
-				big.NewInt(int64(regPos)),
-			}
-			for _, c := range choices {
-				msgB4Fields = append(msgB4Fields, c)
-			}
+			msgB4Fields := []*big.Int{eid, voterRootBI, regRootBI, pkAx, pkAy, pkVx, pkVy, posReg}
+			msgB4Fields = append(msgB4Fields, choices...)
 			msgB4Fields = append(msgB4Fields, vkeys.weight, re.B3.Rx, re.B3.Ry, re.B3.S)
 			msgB4 := poseidonHashBytes(msgB4Fields...)
 
@@ -450,52 +507,38 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 			B4_S := new(big.Int).SetBytes(B4_sig[32:])
 
 			// maybe corrupt sigs
-			B3_Rx := re.B3.Rx
-			B3_Ry := re.B3.Ry
-			B3_S := re.B3.S
+			B3_Rx, B3_Ry, B3_S := re.B3.Rx, re.B3.Ry, re.B3.S
 			if !jb.GoodAnchorSig {
-				B3_Rx = randomScalar()
-				B3_Ry = randomScalar()
-				B3_S = randomScalar()
+				B3_Rx, B3_Ry, B3_S = randomScalar(), randomScalar(), randomScalar()
 			}
 			B4_Rx := fieldToBigInt(B4_R.X)
 			B4_Ry := fieldToBigInt(B4_R.Y)
 			B4s := B4_S
 			if !jb.GoodVoteSig {
-				B4_Rx = randomScalar()
-				B4_Ry = randomScalar()
-				B4s = randomScalar()
+				B4_Rx, B4_Ry, B4s = randomScalar(), randomScalar(), randomScalar()
 			}
 
 			// ElGamal encryption (per-field)
+			enc := func(m *big.Int) ElGamalCiphertext {
+				c1, c2 := elgamalEncryptScalar(m, elgG, elgH)
+				return ElGamalCiphertext{C1: c1, C2: c2}
+			}
 			ct := BallotCiphertexts{}
-			c1, c2 := elgamalEncryptScalar(eid, elgG, elgH)
-			ct.EidC = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(fieldToBigInt(vkeys.anchorPk.A.X), elgG, elgH)
-			ct.PkAnchorX_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(fieldToBigInt(vkeys.anchorPk.A.Y), elgG, elgH)
-			ct.PkAnchorY_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(fieldToBigInt(vkeys.votePk.A.X), elgG, elgH)
-			ct.PkVoteX_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(fieldToBigInt(vkeys.votePk.A.Y), elgG, elgH)
-			ct.PkVoteY_C = ElGamalCiphertext{C1: c1, C2: c2}
+			ct.EidC = enc(eid)
+			ct.PkAnchorX_C = enc(pkAx)
+			ct.PkAnchorY_C = enc(pkAy)
+			ct.PkVoteX_C = enc(pkVx)
+			ct.PkVoteY_C = enc(pkVy)
 			ct.ChoiceC = make([]ElGamalCiphertext, numChoices)
 			for i := 0; i < numChoices; i++ {
-				c1, c2 = elgamalEncryptScalar(choices[i], elgG, elgH)
-				ct.ChoiceC[i] = ElGamalCiphertext{C1: c1, C2: c2}
+				ct.ChoiceC[i] = enc(choices[i])
 			}
-			c1, c2 = elgamalEncryptScalar(B3_Rx, elgG, elgH)
-			ct.B3_RX_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(B3_Ry, elgG, elgH)
-			ct.B3_RY_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(B3_S, elgG, elgH)
-			ct.B3_S_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(B4_Rx, elgG, elgH)
-			ct.B4_RX_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(B4_Ry, elgG, elgH)
-			ct.B4_RY_C = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(B4s, elgG, elgH)
-			ct.B4_S_C = ElGamalCiphertext{C1: c1, C2: c2}
+			ct.B3_RX_C = enc(B3_Rx)
+			ct.B3_RY_C = enc(B3_Ry)
+			ct.B3_S_C = enc(B3_S)
+			ct.B4_RX_C = enc(B4_Rx)
+			ct.B4_RY_C = enc(B4_Ry)
+			ct.B4_S_C = enc(B4s)
 
 			// voter Merkle path (maybe bad)
 			ct.PathWeightC = make([]ElGamalCiphertext, len(voterProofs[vIdx]))
@@ -504,247 +547,98 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 				if !jb.GoodVoterMerkle {
 					val = randomScalar()
 				}
-				c1, c2 = elgamalEncryptScalar(val, elgG, elgH)
-				ct.PathWeightC[i] = ElGamalCiphertext{C1: c1, C2: c2}
+				ct.PathWeightC[i] = enc(val)
 			}
-			c1, c2 = elgamalEncryptScalar(big.NewInt(int64(vIdx)), elgG, elgH)
-			ct.LeafIndexC = ElGamalCiphertext{C1: c1, C2: c2}
-			c1, c2 = elgamalEncryptScalar(vkeys.weight, elgG, elgH)
-			ct.WeightC = ElGamalCiphertext{C1: c1, C2: c2}
-
-			// registration Merkle path (maybe bad)
-			ct.PathRegC = make([]ElGamalCiphertext, len(regProofs[regPos]))
-			for i, node := range regProofs[regPos] {
-				val := node
-				if !jb.GoodRegMerkle {
-					val = randomScalar()
-				}
-				c1, c2 = elgamalEncryptScalar(val, elgG, elgH)
-				ct.PathRegC[i] = ElGamalCiphertext{C1: c1, C2: c2}
-			}
-			c1, c2 = elgamalEncryptScalar(big.NewInt(int64(regPos)), elgG, elgH)
-			ct.PosRegC = ElGamalCiphertext{C1: c1, C2: c2}
-
+			ct.LeafIndexC = enc(big.NewInt(int64(vIdx)))
+			ct.WeightC = enc(vkeys.weight)
+			ct.PosRegC = enc(posReg)
 			allBallotCts = append(allBallotCts, ct)
 
-			isValid := jb.GoodAnchorSig && jb.GoodVoteSig && jb.GoodVoterMerkle && jb.GoodRegMerkle
-			ballotValidityFlags = append(ballotValidityFlags, isValid)
+			// Registration opening bit: what the old in-circuit Merkle check
+			// returned for this fixture (a bad registration is now a RegOk=0
+			// attested by the opening proofs).  The tuple hash is computed
+			// over the fields as the circuit decrypts them (B3 possibly corrupted).
+			regOk = append(regOk, jb.GoodRegMerkle)
+			hB3 := poseidonHashFields(B3_Rx, B3_Ry, B3_S)
+			tupleHashes = append(tupleHashes, regTupleHashNative(pkAx, pkAy, posReg, hB3))
 
-			plainBallots = append(plainBallots, struct {
-				PkAx, PkAy *big.Int
-				PkVx, PkVy *big.Int
-				PosReg     *big.Int
-				Choices    []*big.Int
-				Weight     *big.Int
-				B3_Rx      *big.Int
-				B3_Ry      *big.Int
-				B3_S       *big.Int
-				B4_Rx      *big.Int
-				B4_Ry      *big.Int
-				B4_S       *big.Int
-			}{
-				PkAx:   fieldToBigInt(vkeys.anchorPk.A.X),
-				PkAy:   fieldToBigInt(vkeys.anchorPk.A.Y),
-				PkVx:   fieldToBigInt(vkeys.votePk.A.X),
-				PkVy:   fieldToBigInt(vkeys.votePk.A.Y),
-				PosReg: big.NewInt(int64(regPos)),
-				Choices: func() []*big.Int {
-					cp := make([]*big.Int, len(choices))
-					for i := range choices {
-						cp[i] = new(big.Int).Set(choices[i])
-					}
-					return cp
-				}(),
-				Weight: vkeys.weight,
-				B3_Rx:  B3_Rx,
-				B3_Ry:  B3_Ry,
-				B3_S:   B3_S,
-				B4_Rx:  B4_Rx,
-				B4_Ry:  B4_Ry,
-				B4_S:   B4s,
+			validity = append(validity, jb.GoodAnchorSig && jb.GoodVoteSig && jb.GoodVoterMerkle && jb.GoodRegMerkle)
+			cp := make([]*big.Int, len(choices))
+			for i := range choices {
+				cp[i] = new(big.Int).Set(choices[i])
+			}
+			plain = append(plain, plainBallot{
+				PkAx: pkAx, PkAy: pkAy, PkVx: pkVx, PkVy: pkVy,
+				PosReg: posReg, Choices: cp, Weight: vkeys.weight,
+				B3_Rx: B3_Rx, B3_Ry: B3_Ry, B3_S: B3_S,
+				B4_Rx: B4_Rx, B4_Ry: B4_Ry, B4_S: B4s,
 			})
 		}
 	}
-	phaseStart = time.Now()
 
 	numBallots := len(allBallotCts)
 	if numBallots == 0 {
 		t.Fatal("scenario produced 0 ballots")
 	}
 
-	// 6.1 filtered (A2)
-	maskedFiltered := make([]FilteredBallot, numBallots)
-	for i, pb := range plainBallots {
-		if ballotValidityFlags[i] {
-			maskedFiltered[i].Eid = eid
-			maskedFiltered[i].PkAnchorX = pb.PkAx
-			maskedFiltered[i].PkAnchorY = pb.PkAy
-			maskedFiltered[i].PkVoteX = pb.PkVx
-			maskedFiltered[i].PkVoteY = pb.PkVy
-			maskedFiltered[i].PosReg = pb.PosReg
-			maskedFiltered[i].Weight = pb.Weight
-			maskedFiltered[i].Choice = make([]frontend.Variable, numChoices)
-			for j := 0; j < numChoices; j++ {
-				maskedFiltered[i].Choice[j] = pb.Choices[j]
-			}
-			maskedFiltered[i].B3_RX = pb.B3_Rx
-			maskedFiltered[i].B3_RY = pb.B3_Ry
-			maskedFiltered[i].B3_S = pb.B3_S
-			maskedFiltered[i].B4_RX = pb.B4_Rx
-			maskedFiltered[i].B4_RY = pb.B4_Ry
-			maskedFiltered[i].B4_S = pb.B4_S
-		} else {
-			maskedFiltered[i].Eid = big.NewInt(0)
-			maskedFiltered[i].PkAnchorX = big.NewInt(0)
-			maskedFiltered[i].PkAnchorY = big.NewInt(0)
-			maskedFiltered[i].PkVoteX = big.NewInt(0)
-			maskedFiltered[i].PkVoteY = big.NewInt(0)
-			maskedFiltered[i].PosReg = big.NewInt(0)
-			maskedFiltered[i].Weight = big.NewInt(0)
-			maskedFiltered[i].Choice = make([]frontend.Variable, numChoices)
-			for j := 0; j < numChoices; j++ {
-				maskedFiltered[i].Choice[j] = big.NewInt(0)
-			}
-			maskedFiltered[i].B3_RX = big.NewInt(0)
-			maskedFiltered[i].B3_RY = big.NewInt(0)
-			maskedFiltered[i].B3_S = big.NewInt(0)
-			maskedFiltered[i].B4_RX = big.NewInt(0)
-			maskedFiltered[i].B4_RY = big.NewInt(0)
-			maskedFiltered[i].B4_S = big.NewInt(0)
-		}
+	sb := &scenarioBuild{
+		numBallots:  numBallots,
+		numChoices:  numChoices,
+		eid:         eid,
+		voterRootBI: voterRootBI,
+		regRootBI:   regRootBI,
+		plain:       plain,
+		validity:    validity,
+		regOk:       regOk,
+		tupleHashes: tupleHashes,
+		alphaReg:    cregAlphaNative(eid, voterRootBI, regRootBI),
 	}
-	phaseStart = time.Now()
-
-	// 6.2 sorted view A★
-	sortedView := make([]SortedByVoterBallot, numBallots)
-	for i := 0; i < numBallots; i++ {
-		sortedView[i] = SortedByVoterBallot{
-			Eid:       maskedFiltered[i].Eid,
-			PkAnchorX: maskedFiltered[i].PkAnchorX,
-			PkAnchorY: maskedFiltered[i].PkAnchorY,
-			PkVoteX:   maskedFiltered[i].PkVoteX,
-			PkVoteY:   maskedFiltered[i].PkVoteY,
-			PosReg:    maskedFiltered[i].PosReg,
-			Weight:    maskedFiltered[i].Weight,
-			Choice:    append([]frontend.Variable{}, maskedFiltered[i].Choice...),
-			B3_RX:     maskedFiltered[i].B3_RX,
-			B3_RY:     maskedFiltered[i].B3_RY,
-			B3_S:      maskedFiltered[i].B3_S,
-			B4_RX:     maskedFiltered[i].B4_RX,
-			B4_RY:     maskedFiltered[i].B4_RY,
-			B4_S:      maskedFiltered[i].B4_S,
-		}
+	sb.creg = computeCReg(sb.alphaReg, tupleHashes, regOk)
+	sb.skeleton = NewSkeleton(numBallots, numChoices, len(allBallotCts[0].PathWeightC))
+	sb.assignment = CastIronCircuit{
+		ElectionID:       eid,
+		VoterRollRoot:    voterRootBI,
+		RegistrationRoot: regRootBI,
+		ElGamalG:         elgG,
+		ElGamalH:         elgH,
+		BulletinBoard:    allBallotCts,
+		ElGamalSk:        elgSk,
 	}
-	sort.Slice(sortedView, func(i, j int) bool {
-		ix := sortedView[i].PkAnchorX.(*big.Int)
-		jx := sortedView[j].PkAnchorX.(*big.Int)
-		if ix.Cmp(jx) < 0 {
-			return true
-		}
-		if ix.Cmp(jx) > 0 {
-			return false
-		}
-		iy := sortedView[i].PkAnchorY.(*big.Int)
-		jy := sortedView[j].PkAnchorY.(*big.Int)
-		if iy.Cmp(jy) < 0 {
-			return true
-		}
-		if iy.Cmp(jy) > 0 {
-			return false
-		}
-		ip := sortedView[i].PosReg.(*big.Int)
-		jp := sortedView[j].PosReg.(*big.Int)
-		return ip.Cmp(jp) <= 0
-	})
-	phaseStart = time.Now()
+	sb.assignment = sb.assignmentFor(validity, regOk)
+	sb.expectedTally = sb.assignment.Tally
+	return sb
+}
 
-	// 6.3 tally
-	expectedTally := make([]frontend.Variable, numChoices)
-	for j := 0; j < numChoices; j++ {
-		expectedTally[j] = big.NewInt(0)
-	}
+/* ----------------------------- the actual test --------------------------- */
 
-	for i := 0; i < numBallots; i++ {
-		keep := false
-		if i == 0 {
-			// very first row always starts a new pk block
-			keep = true
-		} else {
-			// compare with previous row (i-1)
-			xPrev := sortedView[i-1].PkAnchorX.(*big.Int)
-			yPrev := sortedView[i-1].PkAnchorY.(*big.Int)
-			xCurr := sortedView[i].PkAnchorX.(*big.Int)
-			yCurr := sortedView[i].PkAnchorY.(*big.Int)
+// runScenario runs the full scenario with the default simulatedBlockchainLeaves using Groth16.
+func runScenario(t testing.TB, scen JSONScenario) (time.Duration, time.Duration, int, []frontend.Variable) {
+	proofTimes, verifyTime, numBallots, expectedTally := runScenarioWithBlockchainLeavesProveRepeats(t, scen, simulatedBlockchainLeaves, 1, Groth16)
+	return proofTimes[0], verifyTime, numBallots, expectedTally
+}
 
-			// start of a new pk block?
-			pkChanges := xCurr.Cmp(xPrev) != 0 || yCurr.Cmp(yPrev) != 0
-			if pkChanges {
-				keep = true
-			}
-		}
+// runScenarioWithBlockchainLeaves runs the full scenario with one prove using Groth16.
+func runScenarioWithBlockchainLeaves(t testing.TB, scen JSONScenario, numBlockchainLeaves int) (time.Duration, time.Duration, int, []frontend.Variable) {
+	proofTimes, verifyTime, numBallots, expectedTally := runScenarioWithBlockchainLeavesProveRepeats(t, scen, numBlockchainLeaves, 1, Groth16)
+	return proofTimes[0], verifyTime, numBallots, expectedTally
+}
 
-		if keep {
-			for j := 0; j < numChoices; j++ {
-				cj := sortedView[i].Choice[j].(*big.Int)
-				cur := expectedTally[j].(*big.Int)
-				expectedTally[j] = new(big.Int).Add(cur, cj)
-			}
-		}
-	}
-	phaseStart = time.Now()
+// runScenarioWithBlockchainLeavesProveRepeats runs the full scenario and executes Prove numProveRepeats times
+// (setup is done once). Returns all proof durations.
+func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario, numBlockchainLeaves, numProveRepeats int, ps ProofSystem) ([]time.Duration, time.Duration, int, []frontend.Variable) {
+	t.Helper()
+	totalStart := time.Now()
+	sb := buildScenario(t, scen, numBlockchainLeaves)
+	numBallots := sb.numBallots
 
-	// secret validity bits for witness
-	validity := make([]frontend.Variable, numBallots)
-	for i := 0; i < numBallots; i++ {
-		if ballotValidityFlags[i] {
-			validity[i] = 1
-		} else {
-			validity[i] = 0
-		}
-	}
-	phaseStart = time.Now()
-
-	// 7) circuit skeleton
-	var circuit CastIronCircuit
-	circuit.BulletinBoard = make([]BallotCiphertexts, numBallots)
-	circuit.ValidityBits = make([]frontend.Variable, numBallots)
-	circuit.FilteredBallots = make([]FilteredBallot, numBallots)
-	circuit.SortedByVoterBallots = make([]SortedByVoterBallot, numBallots)
-	circuit.Tally = make([]frontend.Variable, numChoices)
-
-	for i := 0; i < numBallots; i++ {
-		circuit.BulletinBoard[i].ChoiceC = make([]ElGamalCiphertext, numChoices)
-		circuit.BulletinBoard[i].PathRegC = make([]ElGamalCiphertext, len(allBallotCts[i].PathRegC))
-		circuit.BulletinBoard[i].PathWeightC = make([]ElGamalCiphertext, len(allBallotCts[i].PathWeightC))
-		circuit.FilteredBallots[i].Choice = make([]frontend.Variable, numChoices)
-		circuit.SortedByVoterBallots[i].Choice = make([]frontend.Variable, numChoices)
-	}
-	phaseStart = time.Now()
-
-	ccs := compileCircuit(t, scen, allBallotCts[0], len(allBallotCts[0].PathRegC), len(allBallotCts[0].PathWeightC), numChoices, ps)
+	phaseStart := time.Now()
+	ccs := compileCircuit(t, sb.skeleton, ps)
 	t.Logf("prep: circuit compile: %s", time.Since(phaseStart))
-	phaseStart = time.Now()
 
-	// 8) witness
-	assignment := CastIronCircuit{
-		ElectionID:           eid,
-		VoterRollRoot:        voterRootBI,
-		RegistrationRoot:     regRootBI,
-		BulletinBoard:        allBallotCts,
-		ElGamalG:             elgG,
-		ElGamalH:             elgH,
-		ElGamalSk:            elgSk,
-		ValidityBits:         validity,
-		FilteredBallots:      maskedFiltered,
-		SortedByVoterBallots: sortedView,
-		Tally:                expectedTally,
-	}
-
-	witness, err := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
+	witness, err := frontend.NewWitness(&sb.assignment, ecc.BN254.ScalarField())
 	if err != nil {
 		t.Fatal(err)
 	}
-	phaseStart = time.Now()
 	pub, err := witness.Public()
 	if err != nil {
 		t.Fatal(err)
@@ -756,7 +650,8 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 
 	switch ps {
 	case Plonk:
-		plonkPk, plonkVk, loaded := loadPlonkKeys(t, numBallots, numBlockchainLeaves)
+		keyName := circuitKeyName("plonk", sb.skeleton)
+		plonkPk, plonkVk, loaded := loadPlonkKeys(t, keyName)
 		if loaded {
 			t.Logf("prep: setup (cached): %s", time.Since(phaseStart))
 		} else {
@@ -768,7 +663,7 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := savePlonkKeys(numBallots, numBlockchainLeaves, plonkPk, plonkVk); err != nil {
+			if err := savePlonkKeys(keyName, plonkPk, plonkVk); err != nil {
 				t.Fatalf("save plonk keys: %v", err)
 			}
 			t.Logf("prep: setup: %s", time.Since(phaseStart))
@@ -793,7 +688,8 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 		verifyTime = time.Since(startVerify)
 
 	default: // Groth16
-		groth16Pk, groth16Vk, loaded := loadGroth16Keys(t, numBallots, numBlockchainLeaves)
+		keyName := circuitKeyName("groth16", sb.skeleton)
+		groth16Pk, groth16Vk, loaded := loadGroth16Keys(t, keyName)
 		if loaded {
 			t.Logf("prep: setup (cached): %s", time.Since(phaseStart))
 		} else {
@@ -801,7 +697,7 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := saveGroth16Keys(numBallots, numBlockchainLeaves, groth16Pk, groth16Vk); err != nil {
+			if err := saveGroth16Keys(keyName, groth16Pk, groth16Vk); err != nil {
 				t.Fatalf("save groth16 keys: %v", err)
 			}
 			t.Logf("prep: setup: %s", time.Since(phaseStart))
@@ -826,17 +722,24 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 		verifyTime = time.Since(startVerify)
 	}
 
-	return proofTimes, verifyTime, numBallots, expectedTally
+	return proofTimes, verifyTime, numBallots, sb.expectedTally
 }
 
-func groth16KeyPaths(numBallots, numBlockchainLeaves int) (string, string) {
-	base := fmt.Sprintf("groth16_%d_ballots_%d_leaves", numBallots, numBlockchainLeaves)
+// circuitKeyName identifies the cached keys by everything that determines the
+// compiled circuit: ballots, choices and voter-roll path length (the circuit no
+// longer depends on the registration-tree size), plus the circuit version tag.
+func circuitKeyName(system string, skeleton *CastIronCircuit) string {
+	return fmt.Sprintf("%s_%s_%d_ballots_%d_choices_pw%d", system, circuitKeyTag,
+		len(skeleton.BulletinBoard), len(skeleton.Tally), len(skeleton.BulletinBoard[0].PathWeightC))
+}
+
+func keyPaths(base string) (string, string) {
 	return filepath.Join("keys", base+"_pk.bin"), filepath.Join("keys", base+"_vk.bin")
 }
 
-func loadGroth16Keys(t testing.TB, numBallots, numBlockchainLeaves int) (groth16.ProvingKey, groth16.VerifyingKey, bool) {
+func loadGroth16Keys(t testing.TB, keyName string) (groth16.ProvingKey, groth16.VerifyingKey, bool) {
 	t.Helper()
-	pkPath, vkPath := groth16KeyPaths(numBallots, numBlockchainLeaves)
+	pkPath, vkPath := keyPaths(keyName)
 
 	pkFile, err := os.Open(pkPath)
 	if err != nil {
@@ -860,8 +763,8 @@ func loadGroth16Keys(t testing.TB, numBallots, numBlockchainLeaves int) (groth16
 	return pk, vk, true
 }
 
-func saveGroth16Keys(numBallots, numBlockchainLeaves int, pk groth16.ProvingKey, vk groth16.VerifyingKey) error {
-	pkPath, vkPath := groth16KeyPaths(numBallots, numBlockchainLeaves)
+func saveGroth16Keys(keyName string, pk groth16.ProvingKey, vk groth16.VerifyingKey) error {
+	pkPath, vkPath := keyPaths(keyName)
 	if err := os.MkdirAll(filepath.Dir(pkPath), 0o755); err != nil {
 		return err
 	}
@@ -891,14 +794,9 @@ func saveGroth16Keys(numBallots, numBlockchainLeaves int, pk groth16.ProvingKey,
 
 /* -------------------- PLONK key persistence -------------------- */
 
-func plonkKeyPaths(numBallots, numBlockchainLeaves int) (string, string) {
-	base := fmt.Sprintf("plonk_%d_ballots_%d_leaves", numBallots, numBlockchainLeaves)
-	return filepath.Join("keys", base+"_pk.bin"), filepath.Join("keys", base+"_vk.bin")
-}
-
-func loadPlonkKeys(t testing.TB, numBallots, numBlockchainLeaves int) (plonk.ProvingKey, plonk.VerifyingKey, bool) {
+func loadPlonkKeys(t testing.TB, keyName string) (plonk.ProvingKey, plonk.VerifyingKey, bool) {
 	t.Helper()
-	pkPath, vkPath := plonkKeyPaths(numBallots, numBlockchainLeaves)
+	pkPath, vkPath := keyPaths(keyName)
 
 	pkFile, err := os.Open(pkPath)
 	if err != nil {
@@ -922,8 +820,8 @@ func loadPlonkKeys(t testing.TB, numBallots, numBlockchainLeaves int) (plonk.Pro
 	return pk, vk, true
 }
 
-func savePlonkKeys(numBallots, numBlockchainLeaves int, pk plonk.ProvingKey, vk plonk.VerifyingKey) error {
-	pkPath, vkPath := plonkKeyPaths(numBallots, numBlockchainLeaves)
+func savePlonkKeys(keyName string, pk plonk.ProvingKey, vk plonk.VerifyingKey) error {
+	pkPath, vkPath := keyPaths(keyName)
 	if err := os.MkdirAll(filepath.Dir(pkPath), 0o755); err != nil {
 		return err
 	}

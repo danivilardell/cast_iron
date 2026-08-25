@@ -4,6 +4,8 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -34,15 +36,43 @@ func generateSyntheticScenario(numBallots int) JSONScenario {
 	}
 }
 
-const numProveRepeats = 1 // Number of proof runs per (ballots, leaves) after setup.
+const numProveRepeats = 5 // Number of proof runs per (ballots, leaves) after setup.
+
+// proverTimeCSV is where TestProverTimePlot writes its results.  The paper's
+// measurements (pre-CReg circuit, plus the MACI rows) stay in plots/prover_time.csv.
+const proverTimeCSV = "plots/prover_time_creg.csv"
+
+// intListEnv parses a comma/space separated list of ints from an environment
+// variable (e.g. CASTIRON_COUNTS="512" to run a subset of the sweep); returns
+// def when unset.
+func intListEnv(name string, def []int) []int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	var out []int
+	for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }) {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			panic(fmt.Sprintf("%s: bad value %q", name, f))
+		}
+		out = append(out, n)
+	}
+	return out
+}
 
 func TestProverTimePlot(t *testing.T) {
 	fmt.Println("TestProverTimePlot")
 
-	// Voter/ballot counts to sweep.
-	counts := []int{512}
-	//blockchainLeavesValues := []int{1 << 10, 1 << 15, 1 << 20, 1 << 25, 1 << 30}
-	blockchainLeavesValues := []int{1 << 30}
+	// Voter/ballot counts and registration-tree sizes to sweep.  Override with
+	// CASTIRON_COUNTS / CASTIRON_LEAVES (comma separated) to run a subset, and
+	// CASTIRON_CSV to write elsewhere (n = 512 needs ≈43 GB to compile).
+	counts := intListEnv("CASTIRON_COUNTS", []int{1, 2, 4, 8, 16, 32, 64, 128, 256})
+	blockchainLeavesValues := intListEnv("CASTIRON_LEAVES", []int{1 << 10, 1 << 20, 1 << 30})
+	csvPath := proverTimeCSV
+	if v := os.Getenv("CASTIRON_CSV"); v != "" {
+		csvPath = v
+	}
 	//proofSystems := []ProofSystem{Groth16, Plonk}
 	proofSystems := []ProofSystem{Groth16}
 
@@ -68,6 +98,12 @@ func TestProverTimePlot(t *testing.T) {
 					t.Logf("[%s] ballots=%d simulatedBlockchainLeaves=%d attempt=%d/%d => %s proof time", ps, c, leaves, i+1, numProveRepeats, d)
 				}
 				t.Logf("[%s] ballots=%d simulatedBlockchainLeaves=%d => all times: %v", ps, c, leaves, proofTimes)
+				if err := os.MkdirAll("plots", 0o755); err != nil {
+					t.Fatalf("creating plots folder: %v", err)
+				}
+				if err := writeProverTimeCSV(ballotsCol, leavesCol, attemptCol, secondsCol, proofSystemCol, csvPath); err != nil {
+					t.Fatalf("writing csv: %v", err)
+				}
 			}
 		}
 	}
@@ -75,7 +111,7 @@ func TestProverTimePlot(t *testing.T) {
 	if err := os.MkdirAll("plots", 0o755); err != nil {
 		t.Fatalf("creating plots folder: %v", err)
 	}
-	if err := writeProverTimeCSV(ballotsCol, leavesCol, attemptCol, secondsCol, proofSystemCol, "plots/prover_time.csv"); err != nil {
+	if err := writeProverTimeCSV(ballotsCol, leavesCol, attemptCol, secondsCol, proofSystemCol, csvPath); err != nil {
 		t.Fatalf("writing csv: %v", err)
 	}
 }
