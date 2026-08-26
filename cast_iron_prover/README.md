@@ -33,7 +33,8 @@ Ballots are ElGamal-encrypted and posted to a public bulletin board. The circuit
 
 ### Private Witness
 
-- sk: TA’s ElGamal secret key (used to derive the KDF seed)
+- sk: TA’s ElGamal secret key (used to derive the KDF seed)  
+- For every ballot, the record entry rσ (ECDSA r-component of the registration transaction, two 128-bit halves) at the ballot's posReg and its Merkle sibling path to Mrk'.Root (looked up by the tallier in the public record)
 
 Note: In this implementation, ballots encrypt PRF-masked field scalars with a MiMC-based KDF from the ElGamal shared secret; the circuit recomputes those masks and “decrypts” by subtraction in the field.
 
@@ -52,8 +53,8 @@ Exactly one choice is selected (one-hot times weight). For each c_ij, define z_i
 (C) Weight Consistency + Voter-Roll Inclusion  
 Recompute leaf = MiMC(pk_anchor.X, pk_anchor.Y, weight). Verify Mrk.Ver(Mrk.Root, leaf, pathWeight, leafIndex) using an ordered fold. Enforce Σ_j c_ij = weight.
 
-(D) Registration Opening (RegOk / CReg)  
-B3 is an anchor signature over (eid, pk_vote, pk_anchor). The registration Merkle path is no longer part of the ballot: the voter proves the CTC opening of their registration separately (voteropening/), and the tallier-side opening circuit attests one bit RegOk_i per ballot. This circuit takes RegOk_i as a secret input (asserted boolean) and binds it through the public accumulator CReg = ∏_i (Poseidon(tupleHash_i, RegOk_i) + alphaReg) over *all* ballots, with tupleHash_i = Poseidon(regTupleDomainTag, pk_anchor.X, pk_anchor.Y, posReg, Poseidon(B3.Rx, B3.Ry, B3.S)) (exactly the voter circuit's TupleHash) and alphaReg = Poseidon(tagCRegAlpha, eid, Mrk.Root, Mrk'.Root). RegOk_i enters the validity flag v_i in place of the old Merkle check.
+(D) Registration Opening  
+B3 is an anchor signature over (eid, pk_vote, pk_anchor) and the ballot also carries the CTC commitment randomness r (paper: B1 = (pk, IC.pk, (σreg, r), t_reg)). The circuit evaluates the CTC opening in-circuit (soft bit): c = H(B3 ∥ r) via the same Poseidon2 chain and wide reduction as the voter registration client, [c]G on secp256k1 with the fixed-base gadget of `voteropening/` (emulated arithmetic, ≈17.6k constraints), x([c]G) = rσ, and Merkle membership of Poseidon(1, posReg, rσ) at index posReg in the record tree with public root Mrk'.Root; rσ and the path are the tallier's private witness (looked up in the public record).
 
 (E) Ballot Signature  
 B4 is a vote signature by pk_vote over (eid, Mrk.Root, Mrk'.Root, B1(keys, posReg), B2(choices, weight), B3(sig)). Verify the EdDSA relation on the BN254 twisted Edwards curve using a MiMC transcript.
@@ -164,21 +165,21 @@ Given all posted encrypted ballots and public election parameters, the prover kn
 
 | path | contents |
 |---|---|
-| `castiron_circuit.go` | the tallying circuit (circuit 1): decryption, validity checks, `RegOk`/`CReg` accumulator, sorting/multiset check, tally |
+| `castiron_circuit.go` | the tallying circuit (monolithic): decryption, validity checks incl. the in-circuit CTC opening, sorting/multiset check, tally |
 | `castiron_full_test.go`, `castiron_scaling_test.go` | scenario builder, Groth16/PLONK prove-verify harness, the Figure 4 sweep (`TestProverTimePlot`) |
-| `castiron_creg_test.go`, `castiron_cross_test.go` | `RegOk`/`CReg` tests; cross-circuit test (same ballots through circuits 1 and 2 give the same `CReg`) |
-| `shared/` | gadgets both circuits share bit-for-bit (Poseidon2 instance, ElGamal, tuple hash, accumulator, record tree) |
-| `voteropening/` | the voter's CTC opening proof (secp256k1 fixed-base gadget; `results/RESULTS.md`) |
-| `auditcircuit/` | circuit 2, the audit circuit (`RESULTS.md`; `bw6verifier/` = native 2-chain soft verifier prototype) |
-| `plots/` | Figure 4 data and figure (`prover_time_total.csv/.pdf`: tallying + audit proving time per run, MACI reference points; `prover_time.csv/.pdf`: the pre-revision measurement), the plot script, machine description of the cloud runs |
+| `castiron_opening_test.go`, `castiron_count_test.go` | registration-opening tests (valid opening, wrong randomness, wrong record entry/path); constraint counts vs ballots/depth |
+| `shared/` | Poseidon2 instance, ElGamal decryption, record tree — in-circuit gadgets and their native counterparts |
+| `voteropening/` | the CTC-opening relation: secp256k1 fixed-base gadget used by the tallying circuit and the registration client's native `ComputeOpening` |
+| `plots/` | Figure 4: `prover_time_raw.csv` (tallying circuit, per proof), `maci_batches_raw.csv` / `maci_time_raw.csv` (MACI v3.0.0 on the same machine), `prover_time_predicted.csv` (extrapolated points), `prover_time_total.csv/.pdf` (the figure), scripts, machine description |
+| `maci_bench/` | scripts used to measure MACI (see its README) |
 | `testdata/`, `example_circuits/`, `detect_adv/` | scenario fixtures and standalone examples |
 
 ```
-go test ./...                       # correctness tests of all circuits (skips the long benchmarks)
-go test -run TestProverTimePlot -v . # Figure 4 sweep of the tallying circuit (CASTIRON_COUNTS / _LEAVES / _CSV to subset)
-AC_SWEEP=1 go test -run TestProverTimeSweep -v ./auditcircuit/        # audit-circuit prover time vs ballots
-VO_BENCH=1 go test -run TestBenchGroth16 -v ./voteropening/          # voter opening proof benchmark
-python3 plots/plot_prover_time.py plots/prover_time_total.csv plots/prover_time_total.png   # re-render Figure 4
+go test ./...                        # correctness tests (skips the long benchmarks)
+go test -run TestProverTimePlot -v . # Figure 4 sweep of the tallying circuit (CASTIRON_COUNTS / _LEAVES / _REPEATS / _CSV to subset)
+python3 plots/maci_totals.py plots/maci_batches_raw.csv   # MACI per-batch timings → per-ballot-count totals
+python3 plots/predict_missing.py     # extrapolate unmeasured ballot counts (default 256, 512) from the measured data
+python3 plots/make_total_plot.py     # merge everything → plots/prover_time_total.csv/.pdf (Figure 4)
 ```
 Benchmarks in the paper were run on an AWS `x2idn.24xlarge` (see `plots/cloud_machine.txt`); `go test ./...` on a
 laptop takes a few minutes (the 50-ballot JSON scenario dominates).

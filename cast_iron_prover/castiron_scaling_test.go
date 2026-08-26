@@ -38,9 +38,11 @@ func generateSyntheticScenario(numBallots int) JSONScenario {
 
 const numProveRepeats = 5 // Number of proof runs per (ballots, leaves) after setup.
 
-// proverTimeCSV is where TestProverTimePlot writes its results.  The paper's
-// measurements (pre-CReg circuit, plus the MACI rows) stay in plots/prover_time.csv.
-const proverTimeCSV = "plots/prover_time_creg.csv"
+// proverTimeCSV is where TestProverTimePlot writes its raw results (one row
+// per proof).  plots/make_total_plot.py merges them with the MACI reference
+// rows of plots/prover_time.csv into plots/prover_time_total.csv and renders
+// Figure 4.  The paper's pre-revision measurements stay in plots/prover_time.csv.
+const proverTimeCSV = "plots/prover_time_raw.csv"
 
 // intListEnv parses a comma/space separated list of ints from an environment
 // variable (e.g. CASTIRON_COUNTS="512" to run a subset of the sweep); returns
@@ -66,12 +68,18 @@ func TestProverTimePlot(t *testing.T) {
 
 	// Voter/ballot counts and registration-tree sizes to sweep.  Override with
 	// CASTIRON_COUNTS / CASTIRON_LEAVES (comma separated) to run a subset, and
-	// CASTIRON_CSV to write elsewhere (n = 512 needs ≈43 GB to compile).
+	// CASTIRON_CSV to write elsewhere (n = 512 needs ≈65 GB to compile: cloud only).
 	counts := intListEnv("CASTIRON_COUNTS", []int{1, 2, 4, 8, 16, 32, 64, 128, 256})
 	blockchainLeavesValues := intListEnv("CASTIRON_LEAVES", []int{1 << 10, 1 << 20, 1 << 30})
 	csvPath := proverTimeCSV
 	if v := os.Getenv("CASTIRON_CSV"); v != "" {
 		csvPath = v
+	}
+	// CASTIRON_REPEATS overrides the number of proofs per configuration (e.g. 4
+	// proofs of a 2048-ballot circuit = one pass over 8192 ballots).
+	repeats := numProveRepeats
+	if v := intListEnv("CASTIRON_REPEATS", nil); len(v) == 1 && v[0] > 0 {
+		repeats = v[0]
 	}
 	//proofSystems := []ProofSystem{Groth16, Plonk}
 	proofSystems := []ProofSystem{Groth16}
@@ -88,14 +96,14 @@ func TestProverTimePlot(t *testing.T) {
 					continue
 				}
 				scen := generateSyntheticScenario(c)
-				proofTimes, _, _, _ := runScenarioWithBlockchainLeavesProveRepeats(t, scen, leaves, numProveRepeats, ps)
+				proofTimes, _, _, _ := runScenarioWithBlockchainLeavesProveRepeats(t, scen, leaves, repeats, ps)
 				for i, d := range proofTimes {
 					ballotsCol = append(ballotsCol, c)
 					leavesCol = append(leavesCol, leaves)
 					attemptCol = append(attemptCol, i+1)
 					secondsCol = append(secondsCol, d.Seconds())
 					proofSystemCol = append(proofSystemCol, ps.String())
-					t.Logf("[%s] ballots=%d simulatedBlockchainLeaves=%d attempt=%d/%d => %s proof time", ps, c, leaves, i+1, numProveRepeats, d)
+					t.Logf("[%s] ballots=%d simulatedBlockchainLeaves=%d attempt=%d/%d => %s proof time", ps, c, leaves, i+1, repeats, d)
 				}
 				t.Logf("[%s] ballots=%d simulatedBlockchainLeaves=%d => all times: %v", ps, c, leaves, proofTimes)
 				if err := os.MkdirAll("plots", 0o755); err != nil {

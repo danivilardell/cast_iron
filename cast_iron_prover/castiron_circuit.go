@@ -13,6 +13,7 @@ import (
 	tedwards "github.com/consensys/gnark-crypto/ecc/twistededwards"
 
 	"cast_iron/shared"
+	"cast_iron/voteropening"
 )
 
 /* ======================= Public ballot container ======================= */
@@ -35,12 +36,15 @@ type BallotCiphertexts struct {
 	// B2 choices encrypted (one-hot * weight)
 	ChoiceC []ElGamalCiphertext
 
-	// Encrypted proofs and indices.  The registration Merkle path (PathRegC)
-	// is gone: registration validity is attested by the voter opening proofs
-	// through the CReg accumulator (see RegOk / CReg below).
+	// Encrypted registration position and voter-roll proof.
 	PosRegC     ElGamalCiphertext
 	LeafIndexC  ElGamalCiphertext
 	PathWeightC []ElGamalCiphertext
+
+	// RegRandC encrypts the CTC commitment randomness r of the registration
+	// (paper: B1 carries (σreg, r)); the circuit checks the opening
+	// rσ = x([H(σreg ∥ r)]G) against the record entry at posReg.
+	RegRandC ElGamalCiphertext
 
 	// Encrypted registered weight
 	WeightC ElGamalCiphertext
@@ -104,11 +108,10 @@ type CastIronCircuit struct {
 	// Phase 1 Output: per-ballot validity (secret)
 	ValidityBits []frontend.Variable `gnark:",secret"`
 
-	// RegOk[i] (secret, one bit per ballot): 1 iff ballot i's registration
-	// commitment opens correctly.  It replaces the in-circuit registration
-	// Merkle check; the bit is attested by the tallier-side opening circuit
-	// (circuit 2), which is linked to this circuit only through CReg.
-	RegOk []frontend.Variable `gnark:",secret"`
+	// RecordOpenings[i] (secret): the record entry the tallier looked up at
+	// ballot i's decrypted posReg (ECDSA r-component rσ of the transaction,
+	// two 128-bit halves) and its sibling path to RegistrationRoot.
+	RecordOpenings []RecordOpening `gnark:",secret"`
 
 	// Phase 2 Outputs:
 	// A2 = Filtered ballots (v_i · decrypted, secret)
@@ -121,38 +124,40 @@ type CastIronCircuit struct {
 	// Phase 2 Final Output: Tally vector (public)
 	// T[j] = total votes for choice j (sum over all kept ballots)
 	Tally []frontend.Variable `gnark:",public"`
-
-	// CReg (public): Fiat–Shamir product accumulator over *every* ballot,
-	//   CReg = ∏_i (Poseidon(tupleHash_i, RegOk[i]) + alphaReg),
-	//   tupleHash_i = Poseidon(regTupleDomainTag, pkAx_i, pkAy_i, posReg_i, H(B3_i)),
-	//   alphaReg    = Poseidon(tagCRegAlpha, ElectionID, VoterRollRoot, RegistrationRoot).
-	// tupleHash_i is exactly the TupleHash public input of the voter opening
-	// circuit (voteropening/circuit.go) with Dom = regTupleDomainTag.
-	CReg frontend.Variable `gnark:",public"`
 }
 
-// The registration tuple hash, the CReg accumulator, the ElGamal gadgets and
-// the Poseidon2 instance live in package shared so that this circuit and the
-// audit circuit (auditcircuit/) cannot drift apart.
-const (
-	regTupleDomainTag = shared.RegTupleDomainTag
-	tagCRegAlpha      = shared.TagCRegAlpha
-)
+// RecordOpening is the tallier's private witness for one ballot: the record
+// entry (transaction ECDSA r-component rσ = RsigHi·2^128 + RsigLo) at the
+// ballot's registration position and its Merkle sibling path (leaf level
+// first) to RegistrationRoot = Mrk.Root(T_R).
+type RecordOpening struct {
+	RsigHi frontend.Variable
+	RsigLo frontend.Variable
+	Path   []frontend.Variable
+}
+
+// Fixed-base gadget configuration for the in-circuit CTC opening: 7-bit
+// windows, 256-bit scalar from the wide hash (see package voteropening).
+var openingGadgetOpts = voteropening.FixedBaseOptions{Window: voteropening.DefaultWindow}
+
+const openingScalarBits = voteropening.ScalarBits
 
 // NewSkeleton returns an unassigned circuit with all slices sized for
-// compilation: numBallots ballots with numChoices choices and a voter-roll
-// Merkle path of pathWeightLen elements (leaf + siblings).
-func NewSkeleton(numBallots, numChoices, pathWeightLen int) *CastIronCircuit {
+// compilation: numBallots ballots with numChoices choices, a voter-roll
+// Merkle path of pathWeightLen elements (leaf + siblings) and a record tree
+// of height recordDepth.
+func NewSkeleton(numBallots, numChoices, pathWeightLen, recordDepth int) *CastIronCircuit {
 	c := &CastIronCircuit{}
 	c.BulletinBoard = make([]BallotCiphertexts, numBallots)
 	c.ValidityBits = make([]frontend.Variable, numBallots)
-	c.RegOk = make([]frontend.Variable, numBallots)
+	c.RecordOpenings = make([]RecordOpening, numBallots)
 	c.FilteredBallots = make([]FilteredBallot, numBallots)
 	c.SortedByVoterBallots = make([]SortedByVoterBallot, numBallots)
 	c.Tally = make([]frontend.Variable, numChoices)
 	for i := range c.BulletinBoard {
 		c.BulletinBoard[i].ChoiceC = make([]ElGamalCiphertext, numChoices)
 		c.BulletinBoard[i].PathWeightC = make([]ElGamalCiphertext, pathWeightLen)
+		c.RecordOpenings[i].Path = make([]frontend.Variable, recordDepth)
 		c.FilteredBallots[i].Choice = make([]frontend.Variable, numChoices)
 		c.SortedByVoterBallots[i].Choice = make([]frontend.Variable, numChoices)
 	}
@@ -160,7 +165,7 @@ func NewSkeleton(numBallots, numChoices, pathWeightLen int) *CastIronCircuit {
 }
 
 /* ============================== ElGamal helpers ============================= */
-// (shared with the audit circuit, see package shared)
+// (see package shared)
 
 func expByBits(api frontend.API, base, exp frontend.Variable) frontend.Variable {
 	return shared.ExpByBits(api, base, exp)
@@ -309,9 +314,42 @@ func voterRollBit(
 	return api.Mul(leafOk, rootOk)
 }
 
-// regTupleHash is shared.RegTupleHash (kept as a local alias for readability).
-func regTupleHash(api frontend.API, pkAx, pkAy, posReg, hB3 frontend.Variable) frontend.Variable {
-	return shared.RegTupleHash(api, pkAx, pkAy, posReg, hB3)
+// registrationOpeningBit is the in-circuit CTC opening (paper Fig. 2, Open),
+// evaluated softly: it returns 1 iff
+//   - c = H(σreg ∥ r) ≠ 0, derived exactly as the registration client does
+//     (voteropening.ComputeOpening: Poseidon2 Merkle–Damgård continuation of
+//     H(B3) with r, then the tag, wide reduction mod the secp256k1 order),
+//   - x([c]G) = rσ, with rσ the record entry supplied by the tallier, and
+//   - Poseidon(1, posReg, rσ_hi, rσ_lo) is the leaf at index posReg of the
+//     record tree with root recordRoot (posReg < 2^depth).
+//
+// Every sub-check is a bit, so an invalid or garbage ballot never makes the
+// circuit unsatisfiable; the only inputs the tallier does not decrypt from the
+// ballot are rσ and the path, which it looks up in the public record.
+func registrationOpeningBit(api frontend.API, g *voteropening.FixedBaseGadget, hB3, r, posReg, recordRoot frontend.Variable, rec RecordOpening) (frontend.Variable, error) {
+	h := shared.NewPoseidonHasherFromState(api, hB3)
+	h.Write(r)
+	h1 := h.Sum()
+	h.Write(voteropening.WideHashTag)
+	h2 := h.Sum()
+	bits, nonzero := g.NonceBitsWide(h1, h2)
+	P, err := g.MulBits(bits)
+	if err != nil {
+		return nil, err
+	}
+	xOk := g.XEqualsBit(P, rec.RsigHi, rec.RsigLo)
+
+	entry := shared.EntryCommitment(api, posReg, rec.RsigHi, rec.RsigLo)
+	fieldBits := api.Compiler().FieldBitLen()
+	posBits := api.ToBinary(posReg, fieldBits)
+	high := frontend.Variable(0)
+	for k := len(rec.Path); k < fieldBits; k++ {
+		high = api.Add(high, posBits[k])
+	}
+	inRange := api.IsZero(high)
+	root := shared.MerkleRootFromPath(api, entry, rec.Path, posBits[:len(rec.Path)])
+	rootOk := eqBit(api, root, recordRoot)
+	return boolAll(api, nonzero, xOk, inRange, rootOk), nil
 }
 
 // eddsaVerifyBit: soft EdDSA verify over BN254 Edwards.
@@ -415,16 +453,18 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 		}
 	}
 
-	if len(c.RegOk) != n {
-		return fmt.Errorf("RegOk must have one entry per ballot (got %d, want %d)", len(c.RegOk), n)
+	if len(c.RecordOpenings) != n {
+		return fmt.Errorf("RecordOpenings must have one entry per ballot (got %d, want %d)", len(c.RecordOpenings), n)
 	}
 
 	// Global key relation (soft): okKey = 1 iff H == G^sk
 	okKey := eqBit(api, expByBits(api, c.ElGamalG, c.ElGamalSk), c.ElGamalH)
 
-	// Registration-opening accumulator: challenge from the public context.
-	alphaReg := shared.CRegAlpha(api, c.ElectionID, c.VoterRollRoot, c.RegistrationRoot)
-	cregAcc := frontend.Variable(1)
+	// Fixed-base secp256k1 gadget for the CTC openings (tables built once).
+	opening, err := voteropening.NewFixedBaseGadget(api, openingGadgetOpts, openingScalarBits)
+	if err != nil {
+		return err
+	}
 
 	/* ======================= Decrypt Once & Process ======================= */
 	// Decrypt all ballots once, then use for both validity checks and filtering
@@ -447,6 +487,7 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 			choices[j] = elgamalDecryptScalar(api, ct.ChoiceC[j].C1, ct.ChoiceC[j].C2, c.ElGamalSk)
 		}
 
+		regRand := elgamalDecryptScalar(api, ct.RegRandC.C1, ct.RegRandC.C2, c.ElGamalSk)
 		b3Rx := elgamalDecryptScalar(api, ct.B3_RX_C.C1, ct.B3_RX_C.C2, c.ElGamalSk)
 		b3Ry := elgamalDecryptScalar(api, ct.B3_RY_C.C1, ct.B3_RY_C.C2, c.ElGamalSk)
 		b3S := elgamalDecryptScalar(api, ct.B3_S_C.C1, ct.B3_S_C.C2, c.ElGamalSk)
@@ -472,14 +513,13 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 		}
 		okVoterRoll := voterRollBit(api, c.VoterRollRoot, pathWeightDec, leafIndexDec, pkAx, pkAy, weightDec)
 
-		// Registration opening: H(B3) is hashed once and reused; the opening
-		// itself is proven by the voter and attested through CReg (every
-		// ballot contributes, valid or not).
+		// Registration validity: the CTC opening of (σreg = B3, r) against the
+		// record entry at posReg (soft bit).
 		hB3 := shared.HashB3(api, b3Rx, b3Ry, b3S)
-		regOk := c.RegOk[i]
-		api.AssertIsBoolean(regOk)
-		tupleHash := regTupleHash(api, pkAx, pkAy, posRegDec, hB3)
-		cregAcc = shared.CRegStep(api, cregAcc, tupleHash, regOk, alphaReg)
+		regOk, err := registrationOpeningBit(api, opening, hB3, regRand, posRegDec, c.RegistrationRoot, c.RecordOpenings[i])
+		if err != nil {
+			return err
+		}
 
 		msgB3 := buildMsgB3(api, c.ElectionID, pkVx, pkVy, pkAx, pkAy)
 		okSigB3 := eddsaVerifyBit(api, curve, sigB3, msgB3, pkAnchor)
@@ -495,7 +535,7 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 			okOneHot,    // exactly one choice
 			okWeight,    // weight matches sum
 			okVoterRoll, // voter roll inclusion
-			regOk,       // registration opening (attested via CReg)
+			regOk,       // registration opening (CTC.Open against the record)
 			okSigB3,     // anchor signature
 			okSigB4,     // vote signature
 		)
@@ -620,9 +660,6 @@ func (c *CastIronCircuit) Define(api frontend.API) error {
 
 	// Multiset equality: products must match
 	api.AssertIsEqual(prodA2, prodAstar)
-
-	// Registration-opening accumulator must match the public output.
-	api.AssertIsEqual(cregAcc, c.CReg)
 
 	/* ======================= Phase 2: Deduplication & Tally ======================= */
 	// We are sorted by (pk_anchor, posReg) ASC.

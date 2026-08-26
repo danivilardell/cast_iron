@@ -10,7 +10,24 @@ import (
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/math/emulated"
-	"github.com/consensys/gnark/std/selector"
+)
+
+// Fp and Fr are the secp256k1 base and scalar fields, emulated in-circuit.
+type (
+	Fp = emulated.Secp256k1Fp
+	Fr = emulated.Secp256k1Fr
+)
+
+const (
+	// ScalarBits is the bit length of the nonce c (the secp256k1 group order n
+	// is 256 bits); the width the gadget's tables are built for.
+	ScalarBits = 256
+	// DefaultWindow is the window width used by the tallying circuit.
+	DefaultWindow = 7
+	// WideHashTag is the tag absorbed after h1 to derive h2 (see package doc).
+	WideHashTag = 1
+
+	frBits = 254 // bit length of the BN254 scalar field (Poseidon output)
 )
 
 // Fixed-base scalar multiplication [c]G on secp256k1 with c given as bits.
@@ -43,34 +60,11 @@ const fixedBaseOffsetExp = 255
 
 var secpOrder = ecc.SECP256K1.ScalarField()
 
-// LookupMode selects how the one-hot selector of a window is built.
-type LookupMode int
-
-const (
-	// LookupTensor derives the one-hot vector from the (boolean) window bits
-	// as the tensor product of the one-hot vectors of the two half-windows.
-	// Exact by construction; (2^⌈w/2⌉-1)(2^⌊w/2⌋-1) multiplications per level.
-	LookupTensor LookupMode = iota
-	// LookupDecoder uses gnark's selector.Decoder (hint + 2·2^w+1 constraints).
-	LookupDecoder
-)
-
-func (m LookupMode) String() string {
-	if m == LookupDecoder {
-		return "decoder"
-	}
-	return "tensor"
-}
-
-// FixedBaseOptions parametrises fixedBaseMul.
+// FixedBaseOptions parametrises the windowed multiplication.  The one-hot
+// selector of a window is the tensor product of the one-hot vectors of its two
+// half-windows (oneHot), exact by construction.
 type FixedBaseOptions struct {
-	Window int
-	Lookup LookupMode
-	// CheckTableLimbs additionally range-checks the limbs of every looked-up
-	// table point.  This is redundant (the limbs are linear combinations of a
-	// one-hot vector with constant coefficients below 2^64) and only kept to
-	// measure its cost.
-	CheckTableLimbs bool
+	Window int // window width in bits (DefaultWindow = 7)
 }
 
 type fixedBaseTables struct {
@@ -293,6 +287,12 @@ func fixedBaseMul(api frontend.API, curve *sw_emulated.Curve[Fp, Fr], bits []fro
 	if err != nil {
 		return nil, err
 	}
+	return fixedBaseMulWithTables(api, curve, fp, tabs, bits), nil
+}
+
+// fixedBaseMulWithTables is fixedBaseMul with precomputed tables (see
+// FixedBaseGadget); len(bits) must equal tabs.nbBits.
+func fixedBaseMulWithTables(api frontend.API, curve *sw_emulated.Curve[Fp, Fr], fp *emulated.Field[Fp], tabs *fixedBaseTables, bits []frontend.Variable) *sw_emulated.AffinePoint[Fp] {
 	var fpParams Fp
 	nbLimbs := int(fpParams.NbLimbs())
 	bitsPerLimb := int(fpParams.BitsPerLimb())
@@ -307,33 +307,19 @@ func fixedBaseMul(api frontend.API, curve *sw_emulated.Curve[Fp, Fr], bits []fro
 		}
 		return api.Add(terms[0], terms[1], terms[2:]...)
 	}
-	// newElement wraps limbs into an emulated element.  With CheckTableLimbs
-	// the limbs are range-checked by the field (NewElement); otherwise we
-	// reuse a constant element (flagged as internal, i.e. width-constrained)
-	// and substitute the limbs, which are exact by construction.
+	// newElement wraps limbs into an emulated element.  The limbs are linear
+	// combinations of a one-hot vector with constant coefficients below
+	// 2^bitsPerLimb, i.e. exact by construction, so no range check is needed:
+	// we reuse a constant element (flagged as internal, i.e. width-constrained)
+	// and substitute the limbs.
 	newElement := func(limbs []frontend.Variable) emulated.Element[Fp] {
-		if opts.CheckTableLimbs {
-			return *fp.NewElement(limbs)
-		}
 		e := *fp.NewElement(big.NewInt(0))
 		e.Limbs = limbs
 		return e
 	}
 	lookup := func(j int, wbits []frontend.Variable) *sw_emulated.AffinePoint[Fp] {
 		size := 1 << tabs.widths[j]
-		var ind []frontend.Variable
-		switch opts.Lookup {
-		case LookupTensor:
-			ind = oneHot(api, wbits)
-		case LookupDecoder:
-			var sel frontend.Variable = wbits[0]
-			if len(wbits) > 1 {
-				sel = api.FromBinary(wbits...)
-			}
-			ind = selector.Decoder(api, size, sel)
-		default:
-			panic("unknown lookup mode")
-		}
+		ind := oneHot(api, wbits)
 		xl := make([]frontend.Variable, nbLimbs)
 		yl := make([]frontend.Variable, nbLimbs)
 		for k := 0; k < nbLimbs; k++ {
@@ -358,5 +344,5 @@ func fixedBaseMul(api frontend.API, curve *sw_emulated.Curve[Fp, Fr], bits []fro
 	for j := 1; j < len(tabs.widths); j++ {
 		acc = curve.Add(acc, lookup(j, window(j)))
 	}
-	return acc, nil
+	return acc
 }

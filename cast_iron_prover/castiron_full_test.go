@@ -25,6 +25,7 @@ import (
 	"github.com/consensys/gnark/test/unsafekzg"
 
 	"cast_iron/shared"
+	"cast_iron/voteropening"
 )
 
 /* ----------------------------- Proof system ----------------------------- */
@@ -177,8 +178,8 @@ func buildPlainMerkleTest(leaves []*big.Int, totalLeaves int) (*big.Int, [][]*bi
 /* ----------------------------- scenario build ---------------------------- */
 
 // circuitKeyTag versions the cached proving keys in keys/: keys generated for
-// the pre-CReg circuit are not valid for the current one.
-const circuitKeyTag = "creg1"
+// earlier versions of the circuit are not valid for the current one.
+const circuitKeyTag = "open1"
 
 // plainBallot is the cleartext content of one ballot (as the circuit decrypts it).
 type plainBallot struct {
@@ -207,10 +208,9 @@ type scenarioBuild struct {
 	eid                    *big.Int
 	voterRootBI, regRootBI *big.Int
 	plain                  []plainBallot
-	validity               []bool     // circuit-computed validity, as expected by the witness views
-	regOk                  []bool     // RegOk[i] supplied to the circuit
-	tupleHashes            []*big.Int // Poseidon(regTupleDomainTag, pkAx, pkAy, posReg, H(B3)) per ballot
-	alphaReg, creg         *big.Int
+	validity               []bool // circuit-computed validity, as expected by the witness views
+	openings               []RecordOpening
+	recordDepth            int
 }
 
 func compileCircuit(t testing.TB, skeleton *CastIronCircuit, ps ProofSystem) constraint.ConstraintSystem {
@@ -343,35 +343,22 @@ func deriveViews(plain []plainBallot, validity []bool, eid *big.Int, numChoices 
 }
 
 // assignmentFor returns a full assignment in which the ballots are treated
-// according to the given validity / RegOk flags (views, tally and CReg are
-// recomputed accordingly).
-func (sb *scenarioBuild) assignmentFor(validity, regOk []bool) CastIronCircuit {
+// according to the given validity flags (views and tally are recomputed).
+func (sb *scenarioBuild) assignmentFor(validity []bool) CastIronCircuit {
 	filtered, sorted, tally := deriveViews(sb.plain, validity, sb.eid, sb.numChoices)
 	a := sb.assignment
 	a.ValidityBits = boolsToVars(validity)
-	a.RegOk = boolsToVars(regOk)
 	a.FilteredBallots = filtered
 	a.SortedByVoterBallots = sorted
 	a.Tally = tally
-	a.CReg = computeCReg(sb.alphaReg, sb.tupleHashes, regOk)
+	a.RecordOpenings = append([]RecordOpening{}, sb.openings...)
 	return a
 }
 
-// scenarioOptions tweaks buildScenario.  recordRoot, when set, is used as the
-// public RegistrationRoot (= Mrk.Root(T_R), the record root the audit circuit
-// verifies against) instead of the harness's synthetic registration tree.
-type scenarioOptions struct {
-	recordRoot *big.Int
-}
-
-// buildScenario generates keys, Merkle roots, ballots and the full witness of
-// a scenario.  numBlockchainLeaves sizes the (lazily built) registration tree
-// whose root is the public RegistrationRoot.
+// buildScenario generates keys, the voter roll, the registrations with their
+// CTC openings and the (lazily built, numBlockchainLeaves-entry) record tree
+// whose root is the public RegistrationRoot, the ballots, and the full witness.
 func buildScenario(t testing.TB, scen JSONScenario, numBlockchainLeaves int) *scenarioBuild {
-	return buildScenarioOpts(t, scen, numBlockchainLeaves, scenarioOptions{})
-}
-
-func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int, opts scenarioOptions) *scenarioBuild {
 	t.Helper()
 	if scen.NumChoices <= 0 {
 		t.Fatal("num_choices must be > 0")
@@ -417,10 +404,10 @@ func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int,
 	}
 	voterRootBI, voterProofs := buildUnaryMerkleTest(voterLeaves)
 
-	// registrations: B3 signatures.  The registration tree is still built for
-	// its root (RegistrationRoot is public and part of the B4 message), but its
-	// paths are no longer part of the ballot: registration validity is attested
-	// by the voter opening proofs through RegOk / CReg.
+	// registrations: B3 = σreg signatures and their CTC openings.  Registration
+	// pos is the transaction at position pos of the record; its ECDSA
+	// r-component rσ = x([c]G) with c = H(σreg ∥ r) (voteropening's relation),
+	// and the record tree leaf is Poseidon(1, pos, rσ_hi, rσ_lo).
 	type regEntry struct {
 		VoterIdx int
 		RegIdx   int
@@ -429,6 +416,8 @@ func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int,
 			Ry *big.Int
 			S  *big.Int
 		}
+		R    *big.Int // commitment randomness (goes into the ballot, encrypted)
+		Rsig *big.Int // record entry
 	}
 	var regEntries []regEntry
 	for vi, v := range scen.Voters {
@@ -451,27 +440,33 @@ func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int,
 			e.B3.Rx = fieldToBigInt(B3_R.X)
 			e.B3.Ry = fieldToBigInt(B3_R.Y)
 			e.B3.S = B3_S
+			for {
+				r := shared.RandomScalar()
+				o, err := voteropening.ComputeOpening(e.B3.Rx, e.B3.Ry, e.B3.S, r)
+				if err == nil {
+					e.R, e.Rsig = r, o.Rsig
+					break
+				}
+			}
 			regEntries = append(regEntries, e)
 		}
 	}
 	regLeaves := make([]*big.Int, len(regEntries))
 	for pos, re := range regEntries {
-		hB3 := poseidonHashFields(re.B3.Rx, re.B3.Ry, re.B3.S)
-		regLeaves[pos] = poseidonHashFields(big.NewInt(0), big.NewInt(int64(pos)), hB3)
+		hi, lo := new(big.Int).Rsh(re.Rsig, 128), new(big.Int).And(re.Rsig, new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1)))
+		regLeaves[pos] = shared.EntryCommitmentNative(big.NewInt(int64(pos)), hi, lo)
 	}
 	if numBlockchainLeaves < len(regLeaves) {
 		t.Fatalf("numBlockchainLeaves (%d) must be >= registrations (%d)", numBlockchainLeaves, len(regLeaves))
 	}
-	regRootBI, _ := buildPlainMerkleTest(regLeaves, numBlockchainLeaves)
-	if opts.recordRoot != nil {
-		regRootBI = opts.recordRoot
-	}
+	regRootBI, regProofs := buildPlainMerkleTest(regLeaves, numBlockchainLeaves)
+	recordDepth := shared.MerkleHeight(numBlockchainLeaves)
 
 	// ballots
 	var allBallotCts []BallotCiphertexts
-	var validity, regOk []bool
+	var validity []bool
 	var plain []plainBallot
-	var tupleHashes []*big.Int
+	var openings []RecordOpening
 
 	for regPos, re := range regEntries {
 		vIdx := re.VoterIdx
@@ -552,15 +547,22 @@ func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int,
 			ct.LeafIndexC = enc(big.NewInt(int64(vIdx)))
 			ct.WeightC = enc(vkeys.weight)
 			ct.PosRegC = enc(posReg)
+			// commitment randomness (a bad registration carries randomness
+			// that does not open the record entry)
+			regRand := re.R
+			if !jb.GoodRegMerkle {
+				regRand = randomScalar()
+			}
+			ct.RegRandC = enc(regRand)
 			allBallotCts = append(allBallotCts, ct)
 
-			// Registration opening bit: what the old in-circuit Merkle check
-			// returned for this fixture (a bad registration is now a RegOk=0
-			// attested by the opening proofs).  The tuple hash is computed
-			// over the fields as the circuit decrypts them (B3 possibly corrupted).
-			regOk = append(regOk, jb.GoodRegMerkle)
-			hB3 := poseidonHashFields(B3_Rx, B3_Ry, B3_S)
-			tupleHashes = append(tupleHashes, regTupleHashNative(pkAx, pkAy, posReg, hB3))
+			// tallier witness: the record entry and path at posReg
+			hi, lo := new(big.Int).Rsh(re.Rsig, 128), new(big.Int).And(re.Rsig, new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1)))
+			path := make([]frontend.Variable, recordDepth)
+			for k := range path {
+				path[k] = regProofs[regPos][k+1] // regProofs[..][0] is the leaf
+			}
+			openings = append(openings, RecordOpening{RsigHi: hi, RsigLo: lo, Path: path})
 
 			validity = append(validity, jb.GoodAnchorSig && jb.GoodVoteSig && jb.GoodVoterMerkle && jb.GoodRegMerkle)
 			cp := make([]*big.Int, len(choices))
@@ -589,12 +591,10 @@ func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int,
 		regRootBI:   regRootBI,
 		plain:       plain,
 		validity:    validity,
-		regOk:       regOk,
-		tupleHashes: tupleHashes,
-		alphaReg:    cregAlphaNative(eid, voterRootBI, regRootBI),
+		openings:    openings,
+		recordDepth: recordDepth,
 	}
-	sb.creg = computeCReg(sb.alphaReg, tupleHashes, regOk)
-	sb.skeleton = NewSkeleton(numBallots, numChoices, len(allBallotCts[0].PathWeightC))
+	sb.skeleton = NewSkeleton(numBallots, numChoices, len(allBallotCts[0].PathWeightC), recordDepth)
 	sb.assignment = CastIronCircuit{
 		ElectionID:       eid,
 		VoterRollRoot:    voterRootBI,
@@ -604,7 +604,7 @@ func buildScenarioOpts(t testing.TB, scen JSONScenario, numBlockchainLeaves int,
 		BulletinBoard:    allBallotCts,
 		ElGamalSk:        elgSk,
 	}
-	sb.assignment = sb.assignmentFor(validity, regOk)
+	sb.assignment = sb.assignmentFor(validity)
 	sb.expectedTally = sb.assignment.Tally
 	return sb
 }
@@ -729,8 +729,8 @@ func runScenarioWithBlockchainLeavesProveRepeats(t testing.TB, scen JSONScenario
 // compiled circuit: ballots, choices and voter-roll path length (the circuit no
 // longer depends on the registration-tree size), plus the circuit version tag.
 func circuitKeyName(system string, skeleton *CastIronCircuit) string {
-	return fmt.Sprintf("%s_%s_%d_ballots_%d_choices_pw%d", system, circuitKeyTag,
-		len(skeleton.BulletinBoard), len(skeleton.Tally), len(skeleton.BulletinBoard[0].PathWeightC))
+	return fmt.Sprintf("%s_%s_%d_ballots_%d_choices_pw%d_rd%d", system, circuitKeyTag,
+		len(skeleton.BulletinBoard), len(skeleton.Tally), len(skeleton.BulletinBoard[0].PathWeightC), len(skeleton.RecordOpenings[0].Path))
 }
 
 func keyPaths(base string) (string, string) {

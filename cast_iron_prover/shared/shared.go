@@ -1,11 +1,11 @@
-// Package shared holds the gadgets and constants that the tallying circuit
-// (circuit 1) and the audit circuit (circuit 2) must agree on bit-for-bit:
-// the Poseidon2 instance, the ElGamal decryption gadget, the registration
-// tuple hash and the CReg accumulator, together with their native (off-circuit)
-// counterparts used to build witnesses and fixtures.
+// Package shared holds the gadgets and constants that the tallying circuit and
+// the registration client (voteropening) must agree on bit-for-bit: the
+// Poseidon2 instance, the ElGamal decryption gadget and the record Merkle
+// tree, together with their native (off-circuit) counterparts used to build
+// witnesses and fixtures.
 //
-// Both circuits are compiled over the BN254 scalar field; every function here
-// is field-agnostic in gnark terms but the native helpers use gnark-crypto's
+// The circuit is compiled over the BN254 scalar field; every function here is
+// field-agnostic in gnark terms but the native helpers use gnark-crypto's
 // BN254 Poseidon2 and must be kept in sync with the circuit's parameters.
 package shared
 
@@ -21,8 +21,7 @@ import (
 	poseidonstd "github.com/consensys/gnark/std/permutation/poseidon2"
 )
 
-// Poseidon2 parameters shared by all Cast Iron circuits (and by
-// voteropening/circuit.go, which duplicates them on purpose).
+// Poseidon2 parameters of every Cast Iron hash.
 const (
 	PoseidonWidth         = 2
 	PoseidonFullRounds    = 6
@@ -32,27 +31,27 @@ const (
 // ElGamalExpBits is the bit length of the ElGamal exponent (the tallier key).
 const ElGamalExpBits = 254
 
-// Domain tags of the registration-opening accumulator.
-const (
-	// RegTupleDomainTag is the `dom` field of the registration tuple hash
-	// Poseidon(dom, pkAx, pkAy, posReg, H(B3)); the voter opening circuit takes
-	// it as its witness Dom.
-	RegTupleDomainTag = 0xC7C
-	// TagCRegAlpha is the domain tag of the CReg challenge derivation
-	// alphaReg = Poseidon(TagCRegAlpha, eid, voterRollRoot, recordRoot).
-	TagCRegAlpha = 0xC7CA
-)
-
 /* ------------------------------- in-circuit ------------------------------- */
 
-// NewPoseidonHasher returns the Merkle–Damgård Poseidon2 hasher used by every
-// Cast Iron circuit (initial state 0, one permutation per absorbed element).
+// NewPoseidonHasher returns the Merkle–Damgård Poseidon2 hasher used by the
+// circuit (initial state 0, one permutation per absorbed element).
 func NewPoseidonHasher(api frontend.API) stdhash.FieldHasher {
 	perm, err := poseidonstd.NewPoseidon2FromParameters(api, PoseidonWidth, PoseidonFullRounds, PoseidonPartialRounds)
 	if err != nil {
 		panic(err)
 	}
 	return stdhash.NewMerkleDamgardHasher(api, perm, 0)
+}
+
+// NewPoseidonHasherFromState returns the same Merkle–Damgård hasher as
+// NewPoseidonHasher but starting from a given chaining state, i.e. it
+// continues a hash whose prefix produced that state.
+func NewPoseidonHasherFromState(api frontend.API, state frontend.Variable) stdhash.FieldHasher {
+	perm, err := poseidonstd.NewPoseidon2FromParameters(api, PoseidonWidth, PoseidonFullRounds, PoseidonPartialRounds)
+	if err != nil {
+		panic(err)
+	}
+	return stdhash.NewMerkleDamgardHasher(api, perm, state)
 }
 
 // ExpByBits computes base^exp with a 254-bit square-and-multiply.
@@ -75,46 +74,18 @@ func ElGamalDecryptScalar(api frontend.API, c1, c2, sk frontend.Variable) fronte
 	return api.Mul(c2, api.Inverse(shared))
 }
 
-// EqBit returns 1 iff a == b, 0 otherwise (soft predicate).
-func EqBit(api frontend.API, a, b frontend.Variable) frontend.Variable {
-	return api.IsZero(api.Sub(a, b))
-}
-
 // HashB3 computes H(B3) = Poseidon(B3.Rx, B3.Ry, B3.S), the hash of the
-// registration signature σreg.
+// registration signature σreg; the CTC opening continues this hash with the
+// commitment randomness (voteropening.ComputeOpening natively).
 func HashB3(api frontend.API, rx, ry, s frontend.Variable) frontend.Variable {
 	h := NewPoseidonHasher(api)
 	h.Write(rx, ry, s)
 	return h.Sum()
 }
 
-// RegTupleHash computes the registration tuple hash bound by the voter opening
-// proofs: Poseidon(RegTupleDomainTag, pkAx, pkAy, posReg, H(B3)).  It must stay
-// byte-for-byte identical to voteropening's TupleHash.
-func RegTupleHash(api frontend.API, pkAx, pkAy, posReg, hB3 frontend.Variable) frontend.Variable {
-	h := NewPoseidonHasher(api)
-	h.Write(RegTupleDomainTag, pkAx, pkAy, posReg, hB3)
-	return h.Sum()
-}
-
-// CRegAlpha derives the accumulator challenge from the public context.
-func CRegAlpha(api frontend.API, eid, voterRollRoot, recordRoot frontend.Variable) frontend.Variable {
-	h := NewPoseidonHasher(api)
-	h.Write(TagCRegAlpha, eid, voterRollRoot, recordRoot)
-	return h.Sum()
-}
-
-// CRegStep returns acc · (Poseidon(tupleHash, regOk) + alpha), one step of the
-// accumulator CReg = ∏_i (Poseidon(tupleHash_i, RegOk_i) + alphaReg).
-func CRegStep(api frontend.API, acc, tupleHash, regOk, alpha frontend.Variable) frontend.Variable {
-	h := NewPoseidonHasher(api)
-	h.Write(tupleHash, regOk)
-	return api.Mul(acc, api.Add(h.Sum(), alpha))
-}
-
 /* --------------------------------- native --------------------------------- */
 
-// Field is the scalar field both circuits are compiled over.
+// Field is the scalar field the circuit is compiled over.
 var Field = ecc.BN254.ScalarField()
 
 // FieldToBigInt converts a BN254 scalar-field element to a big.Int.
@@ -135,35 +106,6 @@ func PoseidonMD(vals ...*big.Int) *big.Int {
 		}
 	}
 	return new(big.Int).SetBytes(h.Sum(nil))
-}
-
-// HashB3Native mirrors HashB3.
-func HashB3Native(rx, ry, s *big.Int) *big.Int { return PoseidonMD(rx, ry, s) }
-
-// RegTupleHashNative mirrors RegTupleHash (and voteropening's TupleHash).
-func RegTupleHashNative(pkAx, pkAy, posReg, hB3 *big.Int) *big.Int {
-	return PoseidonMD(big.NewInt(RegTupleDomainTag), pkAx, pkAy, posReg, hB3)
-}
-
-// CRegAlphaNative mirrors CRegAlpha.
-func CRegAlphaNative(eid, voterRollRoot, recordRoot *big.Int) *big.Int {
-	return PoseidonMD(big.NewInt(TagCRegAlpha), eid, voterRollRoot, recordRoot)
-}
-
-// ComputeCReg mirrors the accumulator ∏_i (Poseidon(tupleHash_i, regOk_i) + alpha).
-func ComputeCReg(alpha *big.Int, tupleHashes []*big.Int, regOk []bool) *big.Int {
-	acc := big.NewInt(1)
-	for i, th := range tupleHashes {
-		bit := big.NewInt(0)
-		if regOk[i] {
-			bit = big.NewInt(1)
-		}
-		term := PoseidonMD(th, bit)
-		term.Add(term, alpha)
-		acc.Mul(acc, term)
-		acc.Mod(acc, Field)
-	}
-	return acc
 }
 
 // RandomScalar samples a uniform scalar-field element.
@@ -194,23 +136,14 @@ func ElGamalEncryptScalar(m, g, h *big.Int) (c1, c2 *big.Int) {
 	return c1, c2
 }
 
-// ElGamalDecryptNative mirrors ElGamalDecryptScalar.
-func ElGamalDecryptNative(c1, c2, sk *big.Int) *big.Int {
-	s := new(big.Int).Exp(c1, sk, Field)
-	s.ModInverse(s, Field)
-	m := new(big.Int).Mul(c2, s)
-	return m.Mod(m, Field)
-}
-
 /* ----------------------------- record Merkle tree ----------------------------- */
 
 // EntryDomainTag is the domain tag of the record-entry commitment
-// Poseidon(EntryDomainTag, posReg, rσ_hi, rσ_lo) — the EntryCommitment public
-// input of the voter opening circuit (voteropening/circuit.go, entryDomainTag).
+// Poseidon(EntryDomainTag, posReg, rσ_hi, rσ_lo), the record tree leaf.
 const EntryDomainTag = 1
 
-// EntryCommitmentNative mirrors voteropening's EntryCommitment: the record
-// tree leaf for the transaction at position posReg with ECDSA r-component rσ.
+// EntryCommitmentNative computes the record tree leaf for the transaction at
+// position posReg with ECDSA r-component rσ (as two 128-bit halves).
 func EntryCommitmentNative(posReg, rsigHi, rsigLo *big.Int) *big.Int {
 	return PoseidonMD(big.NewInt(EntryDomainTag), posReg, rsigHi, rsigLo)
 }

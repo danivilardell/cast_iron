@@ -31,26 +31,30 @@ def read_csv(path):
             leaves  = int(row["simulated_blockchain_leaves"])
             ballots = int(row["ballots"])
             secs    = float(row["proof_time_seconds"])
-            by_key[(ballots, leaves)].append(secs)
+            # optional column: 1 = extrapolated value (see predict_missing.py)
+            pred    = str(row.get("predicted", "0") or "0").strip() == "1"
+            by_key[(ballots, leaves, pred)].append(secs)
 
     agg = {}
-    for (b, l), times in by_key.items():
-        agg[(b, l)] = (np.mean(times), np.std(times) if len(times) > 1 else 0.0)
+    for (b, l, p), times in by_key.items():
+        agg[(b, l, p)] = (np.mean(times), np.std(times) if len(times) > 1 else 0.0)
 
-    by_leaves = defaultdict(lambda: ([], [], []))
-    for (ballots, leaves), (mean_s, std_s) in agg.items():
+    by_leaves = defaultdict(lambda: ([], [], [], []))
+    for (ballots, leaves, pred), (mean_s, std_s) in agg.items():
         by_leaves[leaves][0].append(ballots)
         by_leaves[leaves][1].append(mean_s)
         by_leaves[leaves][2].append(std_s)
+        by_leaves[leaves][3].append(pred)
 
     result = {}
     for leaves in sorted(by_leaves.keys()):
-        ballots, means, stds = by_leaves[leaves]
+        ballots, means, stds, preds = by_leaves[leaves]
         order = np.argsort(ballots)
         result[leaves] = (
             [ballots[i] for i in order],
             [means[i]   for i in order],
             [stds[i]    for i in order],
+            [preds[i]   for i in order],
         )
     return result
 
@@ -63,8 +67,8 @@ def make_label(leaves):
 
 
 def main():
-    csv_path = "plots/prover_time.csv"
-    png_path = "plots/prover_time.png"
+    csv_path = "plots/prover_time_total.csv"
+    png_path = "plots/prover_time_total.png"
     if len(sys.argv) >= 2:
         csv_path = sys.argv[1]
     if len(sys.argv) >= 3:
@@ -100,7 +104,7 @@ def main():
     n_curves = len(leaves_sorted)
 
     for i, leaves in enumerate(leaves_sorted):
-        xs, ys, yerrs = by_leaves[leaves]
+        xs, ys, yerrs, _preds = by_leaves[leaves]   # predicted points are drawn like measured ones
         color    = WONG_PALETTE[i % len(WONG_PALETTE)]
         marker   = MARKERS[i % len(MARKERS)]
         label    = make_label(leaves)
@@ -133,8 +137,8 @@ def main():
     ax.legend(handles_s, labels_s, loc="upper left",
               handlelength=2.4, handletextpad=0.5, borderpad=0.7)
 
-    all_xs = [x for xs, _, _ in by_leaves.values() for x in xs]
-    all_ys = [y for _, ys, _ in by_leaves.values() for y in ys]
+    all_xs = [x for xs, _, _, _ in by_leaves.values() for x in xs]
+    all_ys = [y for _, ys, _, _ in by_leaves.values() for y in ys]
     if all_xs and all_ys:
         ax.set_xlim(min(all_xs) * 0.85, max(all_xs) * 1.15)
         ax.set_ylim(min(all_ys) * 0.75, max(all_ys) * 1.35)
