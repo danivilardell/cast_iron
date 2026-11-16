@@ -16,6 +16,7 @@
 
 # Local tooling
 /bin/
+.idea/
 
 # Python
 __pycache__/
