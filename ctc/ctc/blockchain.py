@@ -1,47 +1,29 @@
 """
-Abstract Blockchain interface for the CTC protocol.
+Timestamping oracle TS (paper Sec. 4), realised by a blockchain.
 
-Maps directly to the paper's blockchain API:
-  B.Embed(pp, c)         → tx
-  B.Post(tx)             → (posts to chain via anonymous channel)
-  B.Seq(tx)              → t   (sequence identifier)
-  B.Lookup(t)            → tx
-  B.Filter(pp)           → [tx, ...]  (anonymity set)
-  B.VerifyEmbedding(c, tx) → bool
+The paper's TS exposes Post(m) → t and Read() → M.  Here:
 
-A "transaction" is a plain dict; adapters add chain-specific fields.
-The minimum required field after posting is "seq".
+  post(nonce) → t   build a single-use, balance-emptying transaction, sign it
+                    with ECDSA nonce `nonce` (the CTC commitment c) and Post it.
+                    Building/hashing (Htx) is chain-specific, hence done here.
+  read(t) → r       TS.Read()[t]: the r-component of the record's ECDSA
+                    signature, which is all Open needs (r == x([c]G)).
+
+Positions are t = (round, index) in the paper; on Tron the txid.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
 
-Tx = dict[str, Any]
 SeqId = int | tuple[int, int] | str
 
 
 class Blockchain(ABC):
     @abstractmethod
-    def embed(self, pp: bytes, c: bytes) -> Tx:
-        """Encode commitment c as a transaction object (not yet posted)."""
+    def post(self, nonce: int) -> SeqId:
+        """Sign a transaction with ECDSA nonce `nonce`, post it, return its position t."""
 
     @abstractmethod
-    def post(self, tx: Tx) -> Tx:
-        """
-        Submit tx to the chain via an anonymous channel.
-        Returns the tx enriched with its assigned seq id.
-        """
-
-    @abstractmethod
-    def seq(self, tx: Tx) -> SeqId:
-        """Return the sequence identifier of a confirmed transaction."""
-
-    @abstractmethod
-    def lookup(self, t: SeqId) -> Tx:
-        """Retrieve a transaction by its sequence identifier."""
-
-    @abstractmethod
-    def verify_embedding(self, c: bytes, tx: Tx) -> bool:
-        """Return True iff commitment c is embedded in tx."""
+    def read(self, t: SeqId) -> int:
+        """Return the signature r of the record at t. Raises KeyError if absent."""

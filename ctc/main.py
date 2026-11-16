@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from tronpy import Tron
 from tronpy.providers import HTTPProvider
 
-from ctc.commitment import SHA3Commitment
+from ctc.commitment import encode_message
 from ctc.adapters.tron_blockchain import TronTRC20Blockchain
 from ctc.ctc import CTC
 
@@ -41,20 +41,20 @@ def main() -> None:
         contract_address=contract,
         amount=amount,
     )
-    voter = CTC(SHA3Commitment(), chain)
-    voter.setup()
+    voter = CTC(chain)
 
     # --- Commit ---------------------------------------------------------
-    credential = b"credential:alice:abc123"
-    print(f"[Commit] posting commitment for {credential!r} ...")
+    # m = (pk_i, sigma_reg): placeholder field elements for the demo.
+    credential = encode_message(0x1234, (0xAAAA, 0xBBBB, 0xCCCC))
+    print(f"[Commit] posting commitment for {credential} ...")
     t = voter.commit(credential)
     print(f"[Commit] confirmed — txid: {t}")
 
     # Opening receipt: what the voter would send to the tallier.
     m, r = voter.get_opening(t)
     print(f"[Open]   opening receipt:")
-    print(f"           m = {m!r}")
-    print(f"           r = {r.hex()}")
+    print(f"           m = {m}")
+    print(f"           r = {r}")
     print(f"           t = {t}")
 
     # --- Open -----------------------------------------------------------

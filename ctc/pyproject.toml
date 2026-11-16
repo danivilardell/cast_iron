@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Covert Timestamped Commitments (CTCs) for coercion-resistant voter self-registration"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = ["web3>=7", "ecdsa>=0.19", "tronpy>=0.5", "python-dotenv>=1"]
+dependencies = [
+    "ecdsa>=0.19",
+    "tronpy[offline]>=0.5",
+    "python-dotenv>=1",
+    "eth-hash[pycryptodome]",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

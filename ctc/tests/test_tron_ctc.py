@@ -34,7 +34,6 @@ def tron_ctc():
     try:
         from tronpy import Tron
         from tronpy.providers import HTTPProvider
-        from ctc.commitment import SHA3Commitment
         from ctc.adapters.tron_blockchain import TronNonceBlockchain
         from ctc.ctc import CTC
     except ModuleNotFoundError as exc:
@@ -47,37 +46,30 @@ def tron_ctc():
         signing_key_bytes=bytes.fromhex(TRON_KEY),
         recipient=TRON_RECIPIENT,
     )
-    instance = CTC(SHA3Commitment(), chain)
-    instance.setup()
-    return instance
+    return CTC(chain)
+
+
+M = (777, 11, 22, 33)  # (pk_i, sigma_reg) as field elements
 
 
 @tron_required
 def test_tron_commit_and_open(tron_ctc):
-    m = b"vote:Alice"
+    m = M
     t = tron_ctc.commit(m)
     assert tron_ctc.open_local(t) is True
 
 
 @tron_required
 def test_tron_open_tampered_message_fails(tron_ctc):
-    t = tron_ctc.commit(b"vote:Alice")
-    record = tron_ctc._store[t]
-    assert tron_ctc.open(b"vote:Eve", record.r, t) is False
-
-
-@tron_required
-def test_tron_leak_returns_transactions(tron_ctc):
-    tron_ctc.commit(b"vote:Bob")
-    leaked = tron_ctc.leak()
-    assert isinstance(leaked, list)
-    assert len(leaked) >= 1
+    t = tron_ctc.commit(M)
+    _, r = tron_ctc.get_opening(t)
+    assert tron_ctc.open((778, 11, 22, 33), r, t) is False
 
 
 @tron_required
 def test_tron_seq_ids_are_ordered(tron_ctc):
-    t0 = tron_ctc.commit(b"vote:Carol")
-    t1 = tron_ctc.commit(b"vote:Dave")
+    t0 = tron_ctc.commit((1, 2, 3, 4))
+    t1 = tron_ctc.commit((5, 6, 7, 8))
     assert isinstance(t0, str)
     assert isinstance(t1, str)
     assert t0 != t1

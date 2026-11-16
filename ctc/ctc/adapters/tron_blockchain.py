@@ -2,31 +2,30 @@
 Tron blockchain adapters for the CTC protocol.
 
 ECDSA-nonce embedding (shared by both adapters):
-  - Commitment c is embedded as the ECDSA signature nonce k in a minimal transfer.
-  - k = first SHA3-256 iteration of c that produces a nonzero scalar mod n.
-  - The transaction is built offline, signed with the commitment-derived nonce,
-    and then broadcast through TronPy.
-  - At opening, the verifier recomputes k from c and checks that the on-chain
-    signature's r value equals (k*G).x mod n.
+  - The Poseidon2 commitment c = H(m || r) (see ctc.commitment) IS the ECDSA
+    signature nonce, used directly.
+  - The transaction is built, signed with nonce c, and broadcast through TronPy.
+  - At opening, the verifier recomputes c from (m, r) and checks that the
+    on-chain signature's r value equals x(c*G).
 
 Two adapters are provided:
   TronNonceBlockchain  — TRX transfer 
   TronTRC20Blockchain  — TRC-20 transfer
 
-Rotating-address pattern:
-  Set amount to the signing address's full balance so the commitment transaction
-  sweeps all funds to the recipient, leaving the old key empty and worthless after
-  opening reveals it.
+Rotating-address pattern (paper Sec. 4.1):
+  Opening reveals the signing key, so the caller must use a single-use key and
+  set amount to that address's full balance, so the commitment transaction
+  sweeps all funds to the recipient. The adapter does NOT generate keys, fund
+  them, or compute the balance; that is the caller's responsibility.
 """
 
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
 
-import hashlib
 from typing import TYPE_CHECKING
 
-from ctc.blockchain import Blockchain, SeqId, Tx
+from ctc.blockchain import Blockchain, SeqId
 
 if TYPE_CHECKING:
     from tronpy import Tron
@@ -36,17 +35,6 @@ def _secp256k1() -> tuple[int, object]:
     from ecdsa import SECP256k1
 
     return SECP256k1.order, SECP256k1.generator
-
-
-def _commitment_to_k(c: bytes) -> int:
-    """Derive a nonzero ECDSA nonce k from commitment bytes."""
-    n, _ = _secp256k1()
-    digest = c
-    while True:
-        k = int.from_bytes(hashlib.sha3_256(digest).digest(), "big") % n
-        if k != 0:
-            return k
-        digest = hashlib.sha3_256(digest).digest()
 
 
 def _signature_hex_from_k(signing_key_bytes: bytes, message_hash: bytes, k: int) -> str:
@@ -86,31 +74,18 @@ class _TronBase(Blockchain):
         self._address = PrivateKey(signing_key_bytes).public_key.to_base58check_address()
         self._recipient = to_base58check_address(recipient)
 
-    def embed(self, pp: bytes, c: bytes) -> Tx:
-        return {"_k": _commitment_to_k(c)}
-
-    def seq(self, tx: Tx) -> SeqId:
-        return tx["seq"]
-
-    def lookup(self, t: SeqId) -> Tx:
+    def read(self, t: SeqId) -> int:
         if not isinstance(t, str):
             raise ValueError(f"Unsupported seq id format for Tron: {t!r}")
-        raw = self._client.get_transaction(t)
-        return {"txid": raw["txID"], "signature": raw.get("signature", []), "seq": t}
-
-    def verify_embedding(self, c: bytes, tx: Tx) -> bool:
-        k = _commitment_to_k(c)
-        n, generator = _secp256k1()
-        expected_r = (k * generator).x() % n
-        signatures = tx.get("signature", [])
+        signatures = self._client.get_transaction(t).get("signature", [])
         if not signatures:
-            return False
+            raise KeyError(f"No signature on transaction {t!r}")
         sig_hex = signatures[0]
         if sig_hex.startswith("0x"):
             sig_hex = sig_hex[2:]
         from tronpy.keys import Signature
 
-        return Signature.fromhex(sig_hex).r == expected_r
+        return Signature.fromhex(sig_hex).r
 
 
 class TronNonceBlockchain(_TronBase):
@@ -134,8 +109,8 @@ class TronNonceBlockchain(_TronBase):
         super().__init__(client, signing_key_bytes, recipient)
         self._amount = amount
 
-    def post(self, tx: Tx) -> Tx:
-        k = tx.pop("_k")
+    def post(self, nonce: int) -> SeqId:
+        k = nonce
         ref_block_id = self._client.get_latest_solid_block_id()
         txn = self._client.trx.transfer(self._address, self._recipient, self._amount).build(
             offline=True, ref_block_id=ref_block_id
@@ -146,15 +121,9 @@ class TronNonceBlockchain(_TronBase):
             self._signing_key_bytes, bytes.fromhex(txn.txid), k
         )
         txn.set_signature([signature_hex])
-        broadcast_result = txn.broadcast().wait()
+        txn.broadcast().wait()
 
-        return {
-            **tx,
-            "txid": txn.txid,
-            "signature": txn.to_json()["signature"],
-            "seq": txn.txid,
-            "broadcast": broadcast_result,
-        }
+        return txn.txid
 
 
 class TronTRC20Blockchain(_TronBase):
@@ -189,8 +158,8 @@ class TronTRC20Blockchain(_TronBase):
         self._amount = amount
         self._fee_limit = fee_limit
 
-    def post(self, tx: Tx) -> Tx:
-        k = tx.pop("_k")
+    def post(self, nonce: int) -> SeqId:
+        k = nonce
         contract = self._client.get_contract(self._contract_address)
         txn = (
             contract.functions.transfer(self._recipient, self._amount)
@@ -203,12 +172,6 @@ class TronTRC20Blockchain(_TronBase):
             self._signing_key_bytes, bytes.fromhex(txn.txid), k
         )
         txn.set_signature([signature_hex])
-        broadcast_result = txn.broadcast().wait()
+        txn.broadcast().wait()
 
-        return {
-            **tx,
-            "txid": txn.txid,
-            "signature": txn.to_json()["signature"],
-            "seq": txn.txid,
-            "broadcast": broadcast_result,
-        }
+        return txn.txid

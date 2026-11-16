@@ -1,121 +1,82 @@
 """
-CTC protocol: Π_CTC^Com(B)
+Covert Timestamped Commitment (CTC), paper Sec. 4 / Fig. 2.
 
-Implements the real CTC protocol from the paper:
-  Setup         → pp
-  Commit(m)     → t      (stores (m, r, t) locally; posts tx anonymously)
-  Open(m, r, t) → bool  (verify commitment at position t)
+  Commit(m; r) → t       TS.Post a balance-emptying tx whose ECDSA nonce is
+                         c = H(m ‖ r); return its position t
+  Open(m, r, t) → bool   recompute c and check r_sigma == x([c]G) at M[t]
 
-The CTC is instantiated by injecting a CommitmentScheme and a Blockchain.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+from typing import Sequence
 
-from ctc.blockchain import Blockchain, SeqId, Tx
-from ctc.commitment import CommitmentScheme
+from ctc import commitment
+from ctc.blockchain import Blockchain, SeqId
+from ctc.commitment import ResampleError, nonce_point_x
 
 
 @dataclass
 class _LocalRecord:
     """Voter's local state for a single commitment."""
-    m: bytes
-    r: bytes
+    m: tuple[int, ...]
+    r: int
 
 
 class CTC:
     """
-    Covert Timestamped Commitment protocol.
-
     Parameters
     ----------
-    commitment_scheme:
-        Instantiated CommitmentScheme (e.g. SHA3Commitment()).
     blockchain:
-        Instantiated Blockchain adapter (MockBlockchain, EthereumNonceBlockchain, or TronNonceBlockchain).
-    security_param:
-        Security parameter λ in bits; governs randomness length.
+        Blockchain adapter (MockBlockchain, TronNonceBlockchain or
+        TronTRC20Blockchain).
     """
 
-    def __init__(
-        self,
-        commitment_scheme: CommitmentScheme,
-        blockchain: Blockchain,
-        security_param: int = 128,
-    ) -> None:
-        self._com = commitment_scheme
+    def __init__(self, blockchain: Blockchain) -> None:
         self._chain = blockchain
-        self._security_param = security_param
-        self._pp: bytes | None = None
-        # Local storage: seq_id → LocalRecord
         self._store: dict[SeqId, _LocalRecord] = {}
 
-    # ------------------------------------------------------------------
-    # Protocol operations
-    # ------------------------------------------------------------------
-
-    def setup(self) -> bytes:
+    def commit(self, m: Sequence[int], r: int | None = None) -> SeqId:
         """
-        Generate and broadcast public parameters.
+        Commit to m (field elements, e.g. ``encode_message(pk_i, sigma_reg)``).
 
-        In the real protocol pp is broadcast to all parties; here we simply
-        store it locally and return it so the caller can share it.
+        If ``r`` is None, fresh randomness is drawn and resampled in the
+        negligible-probability event that the nonce is unusable (nothing has
+        been posted at that point).  If ``r`` is given and unusable,
+        :class:`ResampleError` is raised.  Returns the position t; (m, r) are
+        stored locally.
         """
-        self._pp = self._com.setup(self._security_param)
-        return self._pp
+        m = tuple(m)
+        if r is None:
+            while True:
+                r = commitment.sample_randomness()
+                try:
+                    c = commitment.commit(m, r)
+                    break
+                except ResampleError:
+                    continue
+        else:
+            c = commitment.commit(m, r)
 
-    def commit(self, m: bytes) -> SeqId:
-        """
-        Commit to message m.
-
-        1. Sample fresh randomness r.
-        2. Compute c = Com(pp, m; r).
-        3. Embed c in a blockchain transaction and post anonymously.
-        4. Record (m, r, t) in local storage.
-        5. Return sequence id t.
-        """
-        if self._pp is None:
-            raise RuntimeError("Call setup() before commit().")
-
-        r = os.urandom(self._security_param // 8)
-        c = self._com.commit(self._pp, m, r)
-
-        tx = self._chain.embed(self._pp, c)
-        tx = self._chain.post(tx)
-        t = self._chain.seq(tx)
-
+        t = self._chain.post(c)
         self._store[t] = _LocalRecord(m=m, r=r)
         return t
 
-    def open(self, m: bytes, r: bytes, t: SeqId) -> bool:
-        """
-        Verify a commitment.
-
-        Recomputes c = Com(pp, m; r), retrieves the transaction at position t,
-        and checks that the embedded commitment matches.
-
-        Returns True iff the commitment is valid.
-        """
-        if self._pp is None:
-            raise RuntimeError("Call setup() before open().")
-
-        c = self._com.commit(self._pp, m, r)
-
+    def open(self, m: Sequence[int], r: int, t: SeqId) -> bool:
+        """True iff the record at position t embeds Com(m; r)."""
         try:
-            tx = self._chain.lookup(t)
+            c = commitment.commit(m, r)
+        except (ResampleError, ValueError):
+            return False
+        try:
+            sig_r = self._chain.read(t)
         except KeyError:
             return False
+        return sig_r == nonce_point_x(c)
 
-        return self._chain.verify_embedding(c, tx)
-
-    # ------------------------------------------------------------------
-    # Convenience helpers for local opening
-    # ------------------------------------------------------------------
-
-    def get_opening(self, t: SeqId) -> tuple[bytes, bytes]:
-        """Return (m, r) for seq id t — the data sent to the tallier to open."""
+    def get_opening(self, t: SeqId) -> tuple[tuple[int, ...], int]:
+        """Return (m, r) for position t — the data the circuit/tallier opens."""
         record = self._store.get(t)
         if record is None:
             raise KeyError(f"No local record for seq id {t!r}.")
@@ -125,8 +86,3 @@ class CTC:
         """Open the commitment at t using locally stored (m, r)."""
         m, r = self.get_opening(t)
         return self.open(m, r, t)
-
-    @property
-    def pp(self) -> bytes | None:
-        """Public parameters (None until setup() is called)."""
-        return self._pp
