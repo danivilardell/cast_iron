@@ -1,185 +1,186 @@
-# 🧩 ZK Voting Circuit (ElGamal-based, MiMC/BN254)
+# Cast Iron tallying circuit
 
-This repository implements the zero-knowledge circuit used in a privacy-preserving voting protocol. The proof certifies that the publicly posted tally was computed only from the published encrypted ballots and according to the protocol rules—without revealing the decryption key or any individual vote.
+A [gnark](https://github.com/Consensys/gnark) (v0.14) implementation of the Cast Iron tallying relation
+(paper Definition 3, Sections 5.3 and 7), proved with Groth16, and the harness that measures its
+proving time (Figure 4).
 
----
+Given the filtered bulletin board BB′, the roots of the weight tree T_W and the record tree T_R, the
+tallier's public key and a result X, the proof shows knowledge of sk_T such that
 
-## 1️⃣ Overview
+```
+pk_T    = Enc.DerivePk(sk_T)
+B_dec   = Enc.D(sk_T, BB′)
+v       = Validate(B_dec, T_W, T_R)
+B_final = Deduplicate(B_dec, v)
+X       = Accumulate(B_final)
+```
 
-### Roles
+FILTER (the proof of plaintext knowledge π_E and the removal of duplicate ciphertexts) happens outside
+the circuit, on public data; the circuit takes BB′ as given.
 
-- Voter i  
-  • Anchor keypair (sk_i, pk_i) with weight w_i  
-  • Optional ephemeral voting keypair (sk_i', pk_i')  
-- Tallying Authority (TA)  
-  • ElGamal keypair (sk, pk)
-
-Ballots are ElGamal-encrypted and posted to a public bulletin board. The circuit proves that:
-1) Each ciphertext decrypts correctly under sk.  
-2) Each decrypted ballot is valid, unique, and properly signed/registered.  
-3) The tally includes only valid ballots, deduplicated per voter under the protocol’s revote rule, and is the correct sum of one-hot weighted choices.
-
----
-
-## 2️⃣ Circuit Inputs
-
-### Public Inputs
-
-- eid: Election identifier  
-- Mrk.Root: Merkle root of voter weights (anchor tree)  
-- Mrk'.Root: Merkle root of registration commitments (ordered registration tree)  
-- BulletinBoard: Ordered list of all posted encrypted ballots (ciphertexts and clear paths/indices as per format)  
-- (optional) T: The published tally vector to be verified (if the tally is public and checked in-circuit)
-
-### Private Witness
-
-- sk: TA’s ElGamal secret key (used to derive the KDF seed)  
-- For every ballot, the record entry rσ (ECDSA r-component of the registration transaction, two 128-bit halves) at the ballot's posReg and its Merkle sibling path to Mrk'.Root (looked up by the tallier in the public record)
-
-Note: In this implementation, ballots encrypt PRF-masked field scalars with a MiMC-based KDF from the ElGamal shared secret; the circuit recomputes those masks and “decrypts” by subtraction in the field.
-
----
-
-## 3️⃣ Phase-1 — Validity Checks (per ballot)
-
-Each stage outputs a bit in {0,1}. Their product is the per-ballot validity flag v_i.
-
-(A) ElGamal / PRF Decryption  
-Goal: Prove knowledge of sk such that decrypting the posted ciphertext yields the clear ballot fields. Compute R = [sk]·C1, K = MiMC(Rx, Ry), and for each labeled scalar m_label = c_label − MiMC(DOMAIN, K, label). This is used for eid, keys, choice vector entries, and signature scalars.
-
-(B) Single-Choice  
-Exactly one choice is selected (one-hot times weight). For each c_ij, define z_ij = 1 − isZero(c_ij), enforce z_ij ∈ {0,1}, and enforce Σ_j z_ij = 1.
-
-(C) Weight Consistency + Voter-Roll Inclusion  
-Recompute leaf = MiMC(pk_anchor.X, pk_anchor.Y, weight). Verify Mrk.Ver(Mrk.Root, leaf, pathWeight, leafIndex) using an ordered fold. Enforce Σ_j c_ij = weight.
-
-(D) Registration Opening  
-B3 is an anchor signature over (eid, pk_vote, pk_anchor) and the ballot also carries the CTC commitment randomness r (paper: B1 = (pk, IC.pk, (σreg, r), t_reg)). The circuit evaluates the CTC opening in-circuit (soft bit): c = H(B3 ∥ r) via the same Poseidon2 chain and wide reduction as the voter registration client, [c]G on secp256k1 with the fixed-base gadget of `voteropening/` (emulated arithmetic, ≈17.6k constraints), x([c]G) = rσ, and Merkle membership of Poseidon(1, posReg, rσ) at index posReg in the record tree with public root Mrk'.Root; rσ and the path are the tallier's private witness (looked up in the public record).
-
-(E) Ballot Signature  
-B4 is a vote signature by pk_vote over (eid, Mrk.Root, Mrk'.Root, B1(keys, posReg), B2(choices, weight), B3(sig)). Verify the EdDSA relation on the BN254 twisted Edwards curve using a MiMC transcript.
-
-(F) Validity Bit  
-v_i = v_dec · v_single · v_weight · v_reg · v_sig ∈ {0,1}.
-
----
-
-## 4️⃣ Phase-2 — Tallying (Filtering, Ordering, Dedup, Sum)
-
-This phase proves that the published tally counts exactly the ballots permitted by the rules and nothing else.
-
-### Data Views A1 → A★
-
-We manipulate three views of the same list and enforce linking constraints between them.
-
-1. **A1**: The posted list (as on the bulletin board).  
-2. **A2 (Filter)**: Zero out invalid ballots with `A2[i] = v_i · A1[i]`. All fields in the row are multiplied by `v_i` so invalid rows become all-zero.  
-3. **A★ (Sort by voter + registration)**: Reorder A2 by `(pk_anchor, posReg)` lexicographically (ascending). Enforce multiset equality `SetEq(A2, A★)` (same rows, permuted) and global lexicographic sortedness: `(pk_anchor_X[i], pk_anchor_Y[i], posReg[i]) ≤ (pk_anchor_X[i+1], pk_anchor_Y[i+1], posReg[i+1])`. This ensures same-voter rows are contiguous and sorted by `posReg` within each voter.
-
-**Intuition**: A2 removes invalid ballots; A★ groups ballots by voter (contiguous blocks) and orders each voter's ballots by registration position (earliest commitment first).
-
-**Optimization note**: A★ combines what would be two separate sorts (A3: sort by voter, A4: sort by registration within voter) into a single lexicographic sort, saving one full pass of hashing, comparison, and multiset equality checking.
-
-### Deduplication Rule (revoting semantics)
-
-For each voter (fixed pk_anchor), only one ballot contributes to the tally: the last valid ballot under that voter's earliest committed key. This is realized by the A★ ordering (which groups ballots by voter and sorts them by registration position) plus a per-voter selector.
-
-Define a guard `keep_i ∈ {0,1}` on A★ such that:
-- `keep_i = 1` for exactly one row in each contiguous block with equal `pk_anchor`, and  
-- the chosen row corresponds to the last ballot associated with the earliest `posReg` for that voter (as established by the A★ ordering and how B3 binds ballots to the earliest committed key).
-
-Then the tally vector is: `T = Σ_i keep_i · A★[i].B2.c` (vector sum over choices).
-
-### Tally Check
-
-The circuit computes the tally `T` and asserts equality with the public tally input: `T_public = Σ_i keep_i · A★[i].Choice`. The tally is a public input/output of the circuit, allowing anyone to verify that the published election results match the tallied valid ballots.
-
----
-
-## 5️⃣ Security Properties (What the Proof Guarantees)
-
-- Correct PRF-mask removal under sk: (A)  
-- Exactly one choice per ballot: (B)  
-- Voter weight and roll inclusion: (C)  
-- Valid registration commitment and path: (D)  
-- Authentic ballot (vote signature): (E)  
-- Inclusion of all posted ballots: SetEq(A1 ↔ A2 ↔ A3 ↔ A4)  
-- Exclusion of invalid ballots: A2 = A1 · v  
-- Correct grouping and intra-voter order: A3 sort by pk, A4 sort by posReg  
-- Revote rule (one counted ballot per voter): keep_i on A4 block per voter  
-- Correct tally sum: T = Σ keep_i · c_i
-
----
-
-## 6️⃣ Developer Notes
-
-- Curves & hashes  
-  • Proof system: Groth16 over BN254.  
-  • Curve arithmetic: BN254 twisted Edwards (for EdDSA and ElGamal group ops).  
-  • Hash/KDF/PRF: MiMC (BN254 field), used for KDF from [sk]·C1, PRF labels, Merkle hashing, and signature transcripts in this codebase.
-
-- ElGamal decrypt path  
-  • Derive R = [sk]·C1 and K = MiMC(Rx, Ry), then unmask each scalar as m = c − MiMC(domain, K, label).
-
-- Merkle paths  
-  • Ordered fold (LSB-first index bits). In-circuit we recompute the leaf and fold over siblings only.
-
-- Set equality (SetEq)  
-  • Implement as a multiset equality gadget (e.g., commit each row with MiMC and prove permutation via a product-argument with a public randomizer, or use a permutation check if your circuit framework provides one).
-
-- Sortedness  
-  • Adjacent-pair ≤ checks; conditionals for ties (pk equal ⇒ compare posReg).
-
-- Dedup guard (keep_i)  
-  • For each voter block in A4, enforce Σ keep_i = 1 and use simple “is boundary / is last” indicators to assign the 1 to the appropriate row.
-
-- Complexity  
-  • Roughly quasi-linear in the number of ballots n (dominated by sort + set-equality); linear in the number of choices C for the final accumulation.
-
----
-
-## 7️⃣ Testing Tips
-
-- If using the PLONK backend, generate the SRS once before running tests:
-  `./utilities/generate_plonk_srs.sh`
-  This writes `testdata/plonk_srs_bn254_canonical.bin` and
-  `testdata/plonk_srs_bn254_lagrange.bin`. Re-run if the max ballot size changes.
-
-- Flip one sibling in a Merkle path → proof must fail.  
-- Change LeafIndex or posReg by ±1 → fail.  
-- Tamper a ChoiceC[j] or Weight → fail.  
-- Duplicate ballots for a voter → only the designated one (per revote rule) should contribute to T.  
-- Shuffle A1 and re-prove → SetEq should still pass, tally unchanged.
-
----
-
-## 8️⃣ Summary
-
-Given all posted encrypted ballots and public election parameters, the prover knows a secret key sk such that decrypting, validating, ordering, deduplicating per voter, and summing the one-hot weighted choices yields exactly the published tally T. The proof reveals no secret key material, individual votes, or voter-to-ballot linkages beyond what the protocol intentionally makes public.
-"""
-
-
----
-
-## Repository layout and reproduction
+## Layout
 
 | path | contents |
 |---|---|
-| `castiron_circuit.go` | the tallying circuit (monolithic): decryption, validity checks incl. the in-circuit CTC opening, sorting/multiset check, tally |
-| `castiron_full_test.go`, `castiron_scaling_test.go` | scenario builder, Groth16/PLONK prove-verify harness, the Figure 4 sweep (`TestProverTimePlot`) |
-| `castiron_opening_test.go`, `castiron_count_test.go` | registration-opening tests (valid opening, wrong randomness, wrong record entry/path); constraint counts vs ballots/depth |
-| `shared/` | Poseidon2 instance, ElGamal decryption, record tree — in-circuit gadgets and their native counterparts |
-| `voteropening/` | the CTC-opening relation: secp256k1 fixed-base gadget used by the tallying circuit and the registration client's native `ComputeOpening` |
-| `plots/` | Figure 4: `prover_time_raw.csv` (tallying circuit, per proof), `maci_batches_raw.csv` / `maci_time_raw.csv` (MACI v3.0.0 on the same machine), `prover_time_predicted.csv` (extrapolated points), `prover_time_total.csv/.pdf` (the figure), scripts, machine description |
-| `maci_bench/` | scripts used to measure MACI (see its README) |
-| `testdata/`, `example_circuits/`, `detect_adv/` | scenario fixtures and standalone examples |
+| `castiron_circuit.go` | the circuit |
+| `shared/` | proving-curve selection, Poseidon2, ElGamal, the record tree: gadgets and their native counterparts |
+| `voteropening/` | the CTC opening `rσ = x([H(m ∥ r)]G)` on secp256k1: fixed-base gadget and the native computation a registration client performs |
+| `castiron_harness_test.go` | builds elections (keys, registrations, record, ballots), the tallier's witness, and a reference tally written from the definition in Section 5.3 |
+| `castiron_test.go` | correctness tests (below) and the JSON scenarios of `testdata/` |
+| `castiron_count_test.go` | constraint counts on the Figure 4 grid and per building block |
+| `castiron_scaling_test.go` | the Figure 4 sweep |
+| `plots/` | Figure 4: measurements, scripts, the figure |
+| `maci_bench/` | scripts that measured MACI for Figure 4 (see its README) |
+
+## The circuit
+
+**Public inputs.** Election identifier; `Mrk.Root(T_W)`; `Mrk.Root(T_R)`; the tallier's ElGamal key
+`(g, h)`; BB′ as a list of ballots, each `16 + m + d` field-wise ElGamal ciphertexts (`m` choices, weight
+tree of depth `d`); the result `X` (`m` field elements).
+
+**Witness.** `sk_T`; for every ballot, the leaf of T_R at the ballot's registration position with its
+sibling path; and the sorted view `B_sorted`.
+
+**A ballot** (Section 5.2) decrypts to
+
+* `B1 = (pk_i, IC.pk, (σreg, r), t_reg)`: the voting key, the inalienable credential's key, the registration
+  signature and CTC randomness, and the registration's position in the record;
+* `B2 = (π_W, w, ν, id_B)`: leaf index and sibling path in the weight tree, the weight, the choice as a
+  one-hot vector scaled by `w`, and the ballot identifier;
+* `σB`, an EdDSA signature under `pk_i` over `(eid, IC.pk, pk_i, t_reg, ν, w, σreg, id_B)`, that is,
+  `(B1, B2)` without the two witnesses `r` and `π_W`.
+
+Keys and signatures are EdDSA on the twisted Edwards curve of the proving field (Baby Jubjub over BN254,
+Jubjub over BLS12-381); every hash is Poseidon2 (width 2, 6 full and 50 partial rounds, Merkle–Damgård).
+
+**Validate.** The validity bit `v` is the product of soft predicates:
+
+| predicate | meaning |
+|---|---|
+| election | the ballot's `eid` is this election's, and `IC.pk ≠ (0, 0)` |
+| choice | `ν` has exactly one nonzero entry and it equals `w` |
+| weight validity | `Poseidon(IC.pk, w)` is the leaf at the ballot's index of T_W |
+| registration validity | `CTC.Open((pk_i, σreg), r, t_reg)`: the nonce `c = H(pk_i ∥ σreg ∥ r)` is nonzero and the leaf of T_R at `t_reg` is `Poseidon(1, t_reg, x([c]G))` |
+| registration binding | `σreg` verifies under `IC.pk` over `(eid, pk_i, IC.pk)` |
+| ballot authenticity | `σB` verifies under `pk_i` |
+
+Three things are asserted rather than tested, because they are the prover's obligations and not
+properties of a ballot: `h = g^{sk_T}`; that the leaf the tallier presents for a ballot is the leaf of T_R
+at that ballot's `t_reg` (whenever `t_reg` is a position of the tree); and, below, the sorted view. The
+consequence is that the validity bits are a function of the public inputs: the prover cannot choose them.
+Conversely, nothing a ballot decrypts to — an index outside a tree, a key that is not a curve point or
+lies outside the prime-order subgroup, random data — makes a constraint unsatisfiable, so no ballot can
+prevent the tally from being proved. To that end the EdDSA check replaces off-curve points before doing
+curve arithmetic and multiplies with the complete addition law only.
+
+**Deduplicate.** Each ballot is projected to a row `(IC.pk, t_reg, id_B, ν·w)` multiplied by `v`, with its
+position `t` on BB′ appended. The prover supplies the rows sorted; the circuit checks
+
+1. *order*: consecutive rows are strictly increasing in `(IC.pk, t_reg, id_B, t)` (positions are distinct,
+   so the sorted view is unique);
+2. *multiset equality* with the unsorted rows, by a grand product over `Poseidon(row) + α` with the
+   challenge `α` derived from the election identifier, the weight-tree root and the digests of both arrays.
+
+A single pass over the sorted rows then selects, for every `IC.pk`, among the rows of its smallest `t_reg`
+that are the first occurrence of their `id_B`, the one with the largest `t`. Rows of invalid ballots are
+all-zero, form one block and carry no weight.
+
+So a voter's later ballot replaces an earlier one; a ballot cast with a credential registered later than
+the voter's first one is ignored; and a re-encryption of an earlier ballot, which the tallier can produce,
+carries that ballot's identifier and is dropped.
+
+**Accumulate.** `X` is the sum of the selected rows' `ν·w`.
+
+### Size
+
+R1CS constraints over BN254, two choices (`go test -run TestConstraint -v .`):
+
+| | per unit |
+|---|---|
+| Poseidon2, per absorbed element (a two-to-one hash is two) | 186 |
+| ElGamal decryption of one field | 763 |
+| EdDSA verification | 6,563 |
+| CTC opening without the record path (nonce hash, `[c]G` on secp256k1, entry commitment) | 21,784 |
+| record path, per level | 374 |
+| weight path, per level (one decryption, one hash) | 1,136 |
+
+The whole circuit, by the number of ballots and the number of leaves |T_R| of the record tree:
+
+| ballots (= voters) | \|T_R\| = 2^10 | \|T_R\| = 2^20 | \|T_R\| = 2^30 |
+|---|---|---|---|
+| 1 | 64,341 | 68,091 | 71,841 |
+| 2 | 128,969 | 136,479 | 143,989 |
+| 4 | 259,250 | 274,280 | 289,310 |
+| 8 | 521,167 | 551,237 | 581,307 |
+
+At |T_R| = 2^30 and n = 16, 32, 64, 128 the circuit has 73,215, 73,517, 73,611 and 74,227 constraints per
+ballot: each doubling of the electorate adds a weight-tree level (one decryption and one hash per ballot),
+partly offset by the lookup tables of the emulated secp256k1 arithmetic amortising over more ballots. Over
+BLS12-381 the counts are 0.2% higher: 4,096 ballots at |T_R| = 2^30 are 325,926,897 constraints (79,572 per
+ballot). BN254's FFT domain (2^28) caps a single proof at roughly 3,300 ballots; larger elections are
+proved over BLS12-381 (`CASTIRON_CURVE=bls12381`).
+
+## Tests
 
 ```
-go test ./...                        # correctness tests (skips the long benchmarks)
-go test -run TestProverTimePlot -v . # Figure 4 sweep of the tallying circuit (CASTIRON_COUNTS / _LEAVES / _REPEATS / _CSV to subset)
-python3 plots/maci_totals.py plots/maci_batches_raw.csv   # MACI per-batch timings → per-ballot-count totals
-python3 plots/predict_missing.py     # extrapolate unmeasured ballot counts (default 256, 512) from the measured data
-python3 plots/make_total_plot.py     # merge everything → plots/prover_time_total.csv/.pdf (Figure 4)
+go test -timeout 0 ./...                      # everything except the Figure 4 sweep (a few minutes)
+CASTIRON_CURVE=bls12381 go test -timeout 0 ./...
 ```
-Benchmarks in the paper were run on an AWS `x2idn.24xlarge` (see `plots/cloud_machine.txt`); `go test ./...` on a
-laptop takes a few minutes (the 50-ballot JSON scenario dominates).
+
+`castiron_test.go` checks the circuit against the reference tally with gnark's test engine, and once
+end to end with Groth16 over a 2^30-entry record:
+
+* results: weighted sums; a different result is rejected;
+* Deduplicate: the latest ballot counts; replays are ignored; the earliest registration counts; random
+  elections mixing all of these;
+* Validate: every way a ballot can be invalid drops exactly that ballot, and it cannot be counted anyway;
+* malformed ballots (out-of-range indices, points off the curve or of low order, all-zero and random
+  plaintexts) leave the relation satisfiable;
+* a tallier presenting a wrong record entry, a wrong decryption key or a sorted view that is not a
+  permutation gets no proof.
+
+`voteropening/` tests the secp256k1 gadget against gnark-crypto and replays the test vectors of the
+Python CTC client (`../ctc/tests/vectors.json`), so that registrations made with the client open in the
+circuit.
+
+## Figure 4
+
+```
+CASTIRON_SWEEP=1 go test -run TestProverTimePlot -timeout 0 -v .          # n = 1..512, |T_R| = 2^10, 2^20, 2^30, 5 proofs each
+CASTIRON_SWEEP=1 CASTIRON_CURVE=bls12381 CASTIRON_COUNTS=4096 CASTIRON_LEAVES=1073741824 CASTIRON_REPEATS=3 \
+    CASTIRON_CSV=plots/prover_time_raw_bls12381.csv go test -run TestProverTimePlot -timeout 0 -v .
+python3 plots/maci_totals.py plots/maci_batches_raw.csv                   # MACI per-batch timings → totals per ballot count
+python3 plots/make_total_plot.py                                          # → plots/prover_time_total.{csv,pdf,png}
+```
+
+The sweep needs a large machine: its 512-ballot configurations use about 100 GB of memory, and the
+4,096-ballot run peaked at 646 GiB. See the comment on `TestProverTimePlot` for its environment variables.
+The trusted setup is run once per configuration and is not part of the reported proving times.
+
+### Measurements
+
+Everything in `plots/` was measured on 2026-11-17 on one AWS `x2idn.24xlarge` (2 × 24 cores, 1.5 TB;
+`plots/cloud_machine.txt`), with nothing else running, in this order: the sweep, the 4,096-ballot proof, MACI.
+Every point of the figure is a measurement (mean of 5 proofs).
+
+| file | contents |
+|---|---|
+| `prover_time_raw.csv`, `.log` | tallying circuit over BN254: n = 1..512, three record sizes, 5 proofs each, with the constraint count and the compile and setup times of every configuration; the log of the run |
+| `prover_time_raw_bls12381.csv`, `.log` | 4,096 ballots in one proof over BLS12-381 at \|T_R\| = 2^30, proved three times; the log of the run |
+| `maci_batches_raw.csv`, `maci_time_raw.csv` | MACI v3.0.0 (QV circuits, snarkjs 0.7.5): every batch proof for n = 1..512, 5 repeats, and the totals per ballot count |
+| `prover_time_total.{csv,pdf,png}` | the figure and its data (`make_total_plot.py`) |
+
+| ballots | \|T_R\| = 2^10 | \|T_R\| = 2^20 | \|T_R\| = 2^30 | MACI |
+|---|---|---|---|---|
+| 1 | 0.13 s | 0.13 s | 0.14 s | 12.8 s |
+| 8 | 0.78 s | 0.89 s | 0.86 s | 16.5 s |
+| 64 | 5.4 s | 5.5 s | 5.7 s | 74.0 s |
+| 128 | 9.6 s | 9.9 s | 10.5 s | 137.9 s |
+| 256 | 19.6 s | 19.5 s | 20.1 s | 258.9 s |
+| 512 | 38.4 s | 38.8 s | 40.6 s | 528.3 s |
+
+The sweep took 1 h 48 min in total: 20 min compiling, 68 min of setups, 20 min proving.
+
+4,096 ballots (BLS12-381, |T_R| = 2^30): compilation 31 min 35 s, setup 2 h 52 min 7 s (including writing the
+96 GB proving key), proofs 7 min 30 s, 6 min 38 s and 6 min 45 s (mean 6 min 58 s; the first proof after
+the setup is the slowest).

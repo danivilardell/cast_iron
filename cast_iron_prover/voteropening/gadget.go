@@ -1,16 +1,16 @@
 // Package voteropening implements the CTC-opening relation of Cast Iron
 // (paper Fig. 2, "Open"): a registration transaction is a covert commitment
-// to the voter's registration signature σreg if its ECDSA nonce was
-// c = H(σreg ∥ r) for the committed randomness r, i.e.
+// to the message m = (pk_i, σreg) if its ECDSA nonce was c = H(m ∥ r) for the
+// committed randomness r, i.e.
 //
-//	c  = (h1·2^254 + h2) mod n,  h1 = Poseidon(σreg ∥ r),  h2 = Poseidon(σreg ∥ r ∥ WideHashTag)
-//	rσ = x([c]G)                 on secp256k1 (emulated over the BN254 scalar field)
+//	c  = (h1·2^k + h2) mod n,  h1 = Poseidon(m ∥ r),  h2 = Poseidon(m ∥ r ∥ WideHashTag)
+//	rσ = x([c]G)               on secp256k1 (emulated over the proving field, k its bit length)
 //
 // The tallying circuit evaluates this relation once per ballot with
 // FixedBaseGadget (castiron_circuit.go, registrationOpeningBit); the
-// registration client evaluates it natively with ComputeOpening.  The
-// secp256k1 part is a windowed fixed-base multiplication with constant tables
-// (fixedbase.go, ≈17.6k constraints for w = 7).
+// registration client evaluates it natively with ComputeOpeningMsg (the Python
+// client in ctc/ computes the same values).  The secp256k1 part is a windowed
+// fixed-base multiplication with constant tables (fixedbase.go).
 package voteropening
 
 import (
@@ -64,21 +64,35 @@ func (g *FixedBaseGadget) MulBits(bits []frontend.Variable) (*sw_emulated.Affine
 	return fixedBaseMulWithTables(g.api, g.curve, g.fp, g.tabs, bits), nil
 }
 
-// XEqualsBit returns 1 iff P.x = rsigHi·2^128 + rsigLo (soft comparison in
-// the emulated base field); rsigHi/rsigLo are range-checked to 128 bits.
-func (g *FixedBaseGadget) XEqualsBit(P *sw_emulated.AffinePoint[Fp], rsigHi, rsigLo frontend.Variable) frontend.Variable {
-	lo := g.api.ToBinary(rsigLo, 128)
-	hi := g.api.ToBinary(rsigHi, 128)
-	rsig := g.fp.FromBits(append(append([]frontend.Variable{}, lo...), hi...)...)
-	return g.fp.IsZero(g.fp.Sub(&P.X, rsig))
+// XHalves returns the x-coordinate of P as two 128-bit halves (hi, lo), the
+// form in which the record tree commits to a transaction's rσ.  The halves
+// are read off the limbs of the reduced element: its value is below 2^256 and
+// congruent to x mod p, hence equal to x unless x < 2^256 − p ≈ 2^32, which
+// for a hash-derived point happens with probability ≈ 2^-224.
+func (g *FixedBaseGadget) XHalves(P *sw_emulated.AffinePoint[Fp]) (hi, lo frontend.Variable) {
+	var params Fp
+	nbLimbs, limbBits := int(params.NbLimbs()), int(params.BitsPerLimb())
+	if 128%limbBits != 0 || nbLimbs*limbBits != 256 {
+		panic(fmt.Sprintf("unsupported limb layout %d×%d bits", nbLimbs, limbBits))
+	}
+	x := g.fp.Reduce(&P.X)
+	half := nbLimbs / 2
+	pack := func(limbs []frontend.Variable) frontend.Variable {
+		v := frontend.Variable(0)
+		for k := len(limbs) - 1; k >= 0; k-- {
+			v = g.api.Add(g.api.Mul(v, pow2(limbBits)), limbs[k])
+		}
+		return v
+	}
+	return pack(x.Limbs[half:]), pack(x.Limbs[:half])
 }
 
-// NonceBitsWide derives the nonce c = (h1·2^254 + h2) mod n from the two
+// NonceBitsWide derives the nonce c = (h1·2^k + h2) mod n from the two
 // Poseidon outputs and returns its ScalarBits bits (canonical) together with
 // the soft bit [c ≠ 0].  The reduction is done in the emulated scalar field
 // (NonceFromHashes is the native counterpart).
 func (g *FixedBaseGadget) NonceBitsWide(h1, h2 frontend.Variable) ([]frontend.Variable, frontend.Variable) {
-	nb := g.api.Compiler().FieldBitLen() // 254 for BN254
+	nb := g.api.Compiler().FieldBitLen() // k: 254 for BN254, 255 for BLS12-381
 	H1 := g.fr.FromBits(g.api.ToBinary(h1, nb)...)
 	H2 := g.fr.FromBits(g.api.ToBinary(h2, nb)...)
 	shift := g.fr.NewElement(pow2(nb))

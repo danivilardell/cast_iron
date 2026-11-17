@@ -26,8 +26,6 @@ const (
 	DefaultWindow = 7
 	// WideHashTag is the tag absorbed after h1 to derive h2 (see package doc).
 	WideHashTag = 1
-
-	frBits = 254 // bit length of the BN254 scalar field (Poseidon output)
 )
 
 // Fixed-base scalar multiplication [c]G on secp256k1 with c given as bits.

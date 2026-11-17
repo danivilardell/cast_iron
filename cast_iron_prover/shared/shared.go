@@ -1,21 +1,22 @@
-// Package shared holds the gadgets and constants that the tallying circuit and
-// the registration client (voteropening) must agree on bit-for-bit: the
-// Poseidon2 instance, the ElGamal decryption gadget and the record Merkle
-// tree, together with their native (off-circuit) counterparts used to build
-// witnesses and fixtures.
-//
-// The circuit is compiled over the BN254 scalar field; every function here is
-// field-agnostic in gnark terms but the native helpers use gnark-crypto's
-// BN254 Poseidon2 and must be kept in sync with the circuit's parameters.
+// Package shared holds what the tallying circuit, its witness builder and the
+// registration client must agree on bit for bit: the proving curve, the
+// Poseidon2 instance, ElGamal over the scalar field and the record Merkle
+// tree.  In-circuit gadgets sit next to their native counterparts.
 package shared
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
+	"os"
+	"sort"
+	"strings"
 
 	"github.com/consensys/gnark-crypto/ecc"
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	poseidonbls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381/fr/poseidon2"
 	poseidonbn254 "github.com/consensys/gnark-crypto/ecc/bn254/fr/poseidon2"
+	tedwards "github.com/consensys/gnark-crypto/ecc/twistededwards"
+	gnarkhash "github.com/consensys/gnark-crypto/hash"
 	"github.com/consensys/gnark/frontend"
 	stdhash "github.com/consensys/gnark/std/hash"
 	poseidonstd "github.com/consensys/gnark/std/permutation/poseidon2"
@@ -28,10 +29,57 @@ const (
 	PoseidonPartialRounds = 50
 )
 
-// ElGamalExpBits is the bit length of the ElGamal exponent (the tallier key).
-const ElGamalExpBits = 254
+/* ------------------------------- proving curve ----------------------------- */
 
-/* ------------------------------- in-circuit ------------------------------- */
+// CurveConfig describes the pairing curve the circuit is compiled over: its
+// scalar field (the circuit's native field) and the twisted Edwards curve
+// defined over it that carries the EdDSA signatures.
+type CurveConfig struct {
+	Name    string
+	ID      ecc.ID
+	Field   *big.Int
+	Edwards tedwards.ID
+}
+
+var curves = map[string]CurveConfig{
+	// Groth16 over BN254 (default): Baby Jubjub for EdDSA.  The scalar field's
+	// two-adicity of 28 caps one proof at 2^28 constraints.
+	"bn254": {Name: "bn254", ID: ecc.BN254, Field: ecc.BN254.ScalarField(), Edwards: tedwards.BN254},
+	// Groth16 over BLS12-381: Jubjub for EdDSA; two-adicity 32, i.e. up to 2^32
+	// constraints in one proof (used for the single-proof large-ballot runs).
+	"bls12381": {Name: "bls12381", ID: ecc.BLS12_381, Field: ecc.BLS12_381.ScalarField(), Edwards: tedwards.BLS12_381},
+}
+
+// Curve is the proving curve, selected by CASTIRON_CURVE (bn254 | bls12381,
+// default bn254).
+var Curve = func() CurveConfig {
+	name := strings.ToLower(strings.TrimSpace(os.Getenv("CASTIRON_CURVE")))
+	if name == "" {
+		name = "bn254"
+	}
+	c, ok := curves[name]
+	if !ok {
+		panic(fmt.Sprintf("CASTIRON_CURVE=%q: unsupported curve (bn254 | bls12381)", name))
+	}
+	return c
+}()
+
+// Field is the scalar field the circuit is compiled over.
+var Field = Curve.Field
+
+// EdwardsCurveID returns the twisted Edwards curve matching the field the
+// circuit is being compiled over.
+func EdwardsCurveID(api frontend.API) tedwards.ID {
+	q := api.Compiler().Field()
+	for _, c := range curves {
+		if c.Field.Cmp(q) == 0 {
+			return c.Edwards
+		}
+	}
+	panic("circuit compiled over an unsupported field")
+}
+
+/* --------------------------------- Poseidon -------------------------------- */
 
 // NewPoseidonHasher returns the Merkle–Damgård Poseidon2 hasher used by the
 // circuit (initial state 0, one permutation per absorbed element).
@@ -43,65 +91,27 @@ func NewPoseidonHasher(api frontend.API) stdhash.FieldHasher {
 	return stdhash.NewMerkleDamgardHasher(api, perm, 0)
 }
 
-// NewPoseidonHasherFromState returns the same Merkle–Damgård hasher as
-// NewPoseidonHasher but starting from a given chaining state, i.e. it
-// continues a hash whose prefix produced that state.
-func NewPoseidonHasherFromState(api frontend.API, state frontend.Variable) stdhash.FieldHasher {
-	perm, err := poseidonstd.NewPoseidon2FromParameters(api, PoseidonWidth, PoseidonFullRounds, PoseidonPartialRounds)
-	if err != nil {
-		panic(err)
+// NewNativePoseidon returns gnark-crypto's Merkle–Damgård Poseidon2 hasher
+// over Curve's scalar field with the circuit's parameters (both curves'
+// defaults are width 2, 6 full / 50 partial rounds, so this is byte for byte
+// NewPoseidonHasher); it is also the hash handed to the native EdDSA signer.
+func NewNativePoseidon() gnarkhash.StateStorer {
+	switch Curve.ID {
+	case ecc.BN254:
+		return poseidonbn254.NewMerkleDamgardHasher()
+	case ecc.BLS12_381:
+		return poseidonbls12381.NewMerkleDamgardHasher()
 	}
-	return stdhash.NewMerkleDamgardHasher(api, perm, state)
+	panic("unsupported curve " + Curve.Name)
 }
 
-// ExpByBits computes base^exp with a 254-bit square-and-multiply.
-func ExpByBits(api frontend.API, base, exp frontend.Variable) frontend.Variable {
-	bits := api.ToBinary(exp, ElGamalExpBits)
-	result := frontend.Variable(1)
-	basePow := base
-	for _, bit := range bits {
-		mul := api.Mul(result, basePow)
-		result = api.Select(bit, mul, result)
-		basePow = api.Mul(basePow, basePow)
-	}
-	return result
-}
-
-// ElGamalDecryptScalar decrypts the multiplicative-ElGamal ciphertext (c1, c2)
-// over the scalar field: m = c2 / c1^sk.
-func ElGamalDecryptScalar(api frontend.API, c1, c2, sk frontend.Variable) frontend.Variable {
-	shared := ExpByBits(api, c1, sk)
-	return api.Mul(c2, api.Inverse(shared))
-}
-
-// HashB3 computes H(B3) = Poseidon(B3.Rx, B3.Ry, B3.S), the hash of the
-// registration signature σreg; the CTC opening continues this hash with the
-// commitment randomness (voteropening.ComputeOpening natively).
-func HashB3(api frontend.API, rx, ry, s frontend.Variable) frontend.Variable {
-	h := NewPoseidonHasher(api)
-	h.Write(rx, ry, s)
-	return h.Sum()
-}
-
-/* --------------------------------- native --------------------------------- */
-
-// Field is the scalar field the circuit is compiled over.
-var Field = ecc.BN254.ScalarField()
-
-// FieldToBigInt converts a BN254 scalar-field element to a big.Int.
-func FieldToBigInt(e fr.Element) *big.Int {
-	b := e.Bytes()
-	return new(big.Int).SetBytes(b[:])
-}
-
-// PoseidonMD hashes field elements exactly like NewPoseidonHasher.
+// PoseidonMD hashes field elements exactly like NewPoseidonHasher (each
+// element absorbed as its 32-byte big-endian encoding, as fr.Element.Bytes()).
 func PoseidonMD(vals ...*big.Int) *big.Int {
-	h := poseidonbn254.NewMerkleDamgardHasher()
+	h := NewNativePoseidon()
 	for _, v := range vals {
-		var e fr.Element
-		e.SetBigInt(v)
-		b := e.Bytes()
-		if _, err := h.Write(b[:]); err != nil {
+		b := new(big.Int).Mod(v, Field).FillBytes(make([]byte, 32))
+		if _, err := h.Write(b); err != nil {
 			panic(err)
 		}
 	}
@@ -115,6 +125,30 @@ func RandomScalar() *big.Int {
 		panic(err)
 	}
 	return r
+}
+
+/* --------------------------------- ElGamal --------------------------------- */
+
+// ExpBits computes base^e for e = Σ bits[i]·2^i (bits boolean, little-endian)
+// by square-and-multiply: three constraints per bit.
+func ExpBits(api frontend.API, base frontend.Variable, bits []frontend.Variable) frontend.Variable {
+	result := frontend.Variable(1)
+	pow := base
+	for i, bit := range bits {
+		result = api.Select(bit, api.Mul(result, pow), result)
+		if i < len(bits)-1 {
+			pow = api.Mul(pow, pow)
+		}
+	}
+	return result
+}
+
+// ElGamalDecryptBits decrypts the multiplicative-ElGamal ciphertext (c1, c2)
+// over the scalar field, m = c2 / c1^sk, with sk given by its bits so that one
+// decomposition of sk serves every ciphertext.  c1 must be nonzero, which the
+// proof of plaintext knowledge checked by FILTER guarantees (c1 = g^r).
+func ElGamalDecryptBits(api frontend.API, c1, c2 frontend.Variable, skBits []frontend.Variable) frontend.Variable {
+	return api.Mul(c2, api.Inverse(ExpBits(api, c1, skBits)))
 }
 
 // ElGamalKeygen samples a tallier key pair for multiplicative ElGamal over the
@@ -136,10 +170,11 @@ func ElGamalEncryptScalar(m, g, h *big.Int) (c1, c2 *big.Int) {
 	return c1, c2
 }
 
-/* ----------------------------- record Merkle tree ----------------------------- */
+/* ------------------------------- record tree ------------------------------- */
 
 // EntryDomainTag is the domain tag of the record-entry commitment
-// Poseidon(EntryDomainTag, posReg, rσ_hi, rσ_lo), the record tree leaf.
+// Poseidon(EntryDomainTag, posReg, rσ_hi, rσ_lo), the record tree leaf of a
+// transaction.
 const EntryDomainTag = 1
 
 // EntryCommitmentNative computes the record tree leaf for the transaction at
@@ -155,10 +190,9 @@ func EntryCommitment(api frontend.API, posReg, rsigHi, rsigLo frontend.Variable)
 	return h.Sum()
 }
 
-// MerkleRootFromPath folds a leaf up a plain Poseidon Merkle tree (the layout
-// of BuildPlainMerkle): at level k the node is hashed with its sibling
-// path[k], on the left if indexBits[k] = 1 and on the right otherwise.  It
-// returns the computed root (callers compare it softly or assert it).
+// MerkleRootFromPath folds a leaf up a Poseidon Merkle tree: at level k the
+// node is hashed with its sibling path[k], on the left if indexBits[k] = 1 and
+// on the right otherwise.  It returns the computed root.
 func MerkleRootFromPath(api frontend.API, leaf frontend.Variable, path []frontend.Variable, indexBits []frontend.Variable) frontend.Variable {
 	h := NewPoseidonHasher(api)
 	sum := leaf
@@ -172,80 +206,94 @@ func MerkleRootFromPath(api frontend.API, leaf frontend.Variable, path []fronten
 	return sum
 }
 
-// BuildPlainMerkle builds a complete Poseidon Merkle tree with
-// 2^⌈log₂ totalLeaves⌉ leaves lazily: leaves[i] sits at position i, positions
-// i < totalLeaves without a provided leaf hold the deterministic filler
-// Poseidon(0, i, 0) (standing in for unrelated transactions), and positions
-// beyond totalLeaves hold Poseidon(0, 0, 0).  It returns the root and, for each
-// provided leaf, its sibling path (leaf level first, height elements).
-func BuildPlainMerkle(leaves []*big.Int, totalLeaves int) (root *big.Int, paths [][]*big.Int) {
-	if totalLeaves <= 0 {
-		return big.NewInt(0), nil
-	}
-	if totalLeaves < len(leaves) {
-		panic("totalLeaves must be >= number of provided leaves")
-	}
-	treeLeaves, height := 1, 0
-	for treeLeaves < totalLeaves {
-		treeLeaves <<= 1
-		height++
-	}
-	type nodeKey struct{ level, idx int }
-	leafValues := make(map[int]*big.Int, len(leaves))
-	for idx, leaf := range leaves {
-		leafValues[idx] = leaf
-	}
-	defaultNodes := make([]*big.Int, height+1)
-	defaultNodes[0] = PoseidonMD(big.NewInt(0), big.NewInt(0), big.NewInt(0))
-	for lvl := 1; lvl <= height; lvl++ {
-		defaultNodes[lvl] = PoseidonMD(defaultNodes[lvl-1], defaultNodes[lvl-1])
-	}
-	cache := make(map[nodeKey]*big.Int)
-	var nodeValue func(level, idx int) *big.Int
-	nodeValue = func(level, idx int) *big.Int {
-		key := nodeKey{level, idx}
-		if v, ok := cache[key]; ok {
-			return v
-		}
-		var out *big.Int
-		if level == 0 {
-			if leaf, ok := leafValues[idx]; ok {
-				out = leaf
-			} else if idx < totalLeaves {
-				out = PoseidonMD(big.NewInt(0), big.NewInt(int64(idx)), big.NewInt(0))
-			} else {
-				out = defaultNodes[0]
-			}
-		} else {
-			start := idx * (1 << level)
-			if start >= len(leaves) {
-				out = defaultNodes[level]
-			} else {
-				out = PoseidonMD(nodeValue(level-1, 2*idx), nodeValue(level-1, 2*idx+1))
-			}
-		}
-		cache[key] = out
-		return out
-	}
-	root = nodeValue(height, 0)
-	paths = make([][]*big.Int, len(leaves))
-	for i := range leaves {
-		idx := i
-		path := make([]*big.Int, height)
-		for lvl := 0; lvl < height; lvl++ {
-			path[lvl] = nodeValue(lvl, idx^1)
-			idx >>= 1
-		}
-		paths[i] = path
-	}
-	return root, paths
-}
-
-// MerkleHeight returns ⌈log₂ totalLeaves⌉, the path length of BuildPlainMerkle.
-func MerkleHeight(totalLeaves int) int {
+// MerkleHeight returns ⌈log₂ leaves⌉.
+func MerkleHeight(leaves int) int {
 	h := 0
-	for tl := 1; tl < totalLeaves; tl <<= 1 {
+	for tl := 1; tl < leaves; tl <<= 1 {
 		h++
 	}
 	return h
+}
+
+// RecordTree is T_R = Mrk.Build(TS.Read()): a complete binary Poseidon tree of
+// the given height whose leaf at position t commits to the record entry M[t].
+// It is stored sparsely (positions never Set hold EmptyLeaf), so a 2^30-entry
+// record costs only as much as the positions an election touches.
+type RecordTree struct {
+	height int
+	leaves map[uint64]*big.Int
+	set    []uint64   // sorted positions of leaves, rebuilt lazily
+	empty  []*big.Int // empty[l] = root of an all-empty subtree of height l
+	nodes  map[[2]uint64]*big.Int
+}
+
+// EmptyLeaf is the leaf of a record position holding no entry.
+func EmptyLeaf() *big.Int {
+	return PoseidonMD(big.NewInt(0), big.NewInt(0), big.NewInt(0))
+}
+
+// NewRecordTree returns an empty record tree with 2^height positions.
+func NewRecordTree(height int) *RecordTree {
+	if height < 0 || height > 62 {
+		panic("record tree height out of range")
+	}
+	t := &RecordTree{height: height, leaves: map[uint64]*big.Int{}, empty: make([]*big.Int, height+1)}
+	t.empty[0] = EmptyLeaf()
+	for l := 1; l <= height; l++ {
+		t.empty[l] = PoseidonMD(t.empty[l-1], t.empty[l-1])
+	}
+	return t
+}
+
+// Height returns the tree height (the length of every sibling path).
+func (t *RecordTree) Height() int { return t.height }
+
+// Set stores leaf at position pos.
+func (t *RecordTree) Set(pos uint64, leaf *big.Int) {
+	if pos>>uint(t.height) != 0 {
+		panic("record position out of range")
+	}
+	t.leaves[pos] = leaf
+	t.set, t.nodes = nil, nil
+}
+
+// Root returns Mrk.Root(T_R).
+func (t *RecordTree) Root() *big.Int { return t.node(t.height, 0) }
+
+// Leaf returns the leaf at position pos.
+func (t *RecordTree) Leaf(pos uint64) *big.Int { return t.node(0, pos) }
+
+// Path returns the sibling path of position pos, leaf level first.
+func (t *RecordTree) Path(pos uint64) []*big.Int {
+	path := make([]*big.Int, t.height)
+	for l := 0; l < t.height; l++ {
+		path[l] = t.node(l, (pos>>uint(l))^1)
+	}
+	return path
+}
+
+func (t *RecordTree) node(level int, idx uint64) *big.Int {
+	if t.set == nil {
+		t.set = make([]uint64, 0, len(t.leaves))
+		for p := range t.leaves {
+			t.set = append(t.set, p)
+		}
+		sort.Slice(t.set, func(i, j int) bool { return t.set[i] < t.set[j] })
+		t.nodes = map[[2]uint64]*big.Int{}
+	}
+	lo, hi := idx<<uint(level), (idx+1)<<uint(level)
+	k := sort.Search(len(t.set), func(i int) bool { return t.set[i] >= lo })
+	if k == len(t.set) || t.set[k] >= hi {
+		return t.empty[level]
+	}
+	if level == 0 {
+		return t.leaves[idx]
+	}
+	key := [2]uint64{uint64(level), idx}
+	if v, ok := t.nodes[key]; ok {
+		return v
+	}
+	v := PoseidonMD(t.node(level-1, 2*idx), t.node(level-1, 2*idx+1))
+	t.nodes[key] = v
+	return v
 }

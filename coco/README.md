@@ -33,8 +33,12 @@ The optimisation is solved with SLSQP. The win probability $\Pr[\cdot]$ is compu
 # Install (requires Python ≥ 3.13)
 uv sync
 
-# Generate the paper figure (PNG + PDF → figures/)
+# Generate the paper figures (PNG + PDF → figures/): the protocol comparison
+# and the election-parameter sweeps (about 25 minutes on a laptop)
 uv run python coco_sim.py
+
+# Cast Iron's CoCo against the anonymity-set size (closed form)
+uv run python anonymity_set_curve.py
 ```
 
 To compute CoCo programmatically:

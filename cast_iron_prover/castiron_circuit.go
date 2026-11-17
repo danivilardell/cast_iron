@@ -1,267 +1,164 @@
-package main
+// Package castiron implements the Cast Iron tallying relation (paper
+// Definition 3) as a gnark circuit.  Given the filtered bulletin board BB′,
+// the roots of the weight tree T_W and of the record tree T_R, the tallier's
+// public key and the claimed result X, the circuit proves knowledge of sk_T
+// such that
+//
+//	pk_T    = Enc.DerivePk(sk_T)
+//	B_dec   = Enc.D(sk_T, BB′)            (field by field)
+//	v       = Validate(B_dec, T_W, T_R)
+//	B_final = Deduplicate(B_dec, v)
+//	X       = Accumulate(B_final)
+//
+// The key relation is asserted; everything computed from ballot contents is
+// a soft predicate (a bit), so that no ballot — however malformed — can make
+// the relation unsatisfiable, and no choice of the prover's witness can change
+// which ballots count.  See README.md for the mapping to the paper.
+package castiron
 
 import (
+	"errors"
 	"fmt"
+	"math/big"
+	"math/bits"
 
 	"github.com/consensys/gnark/frontend"
-
 	"github.com/consensys/gnark/std/algebra/native/twistededwards"
 	stdhash "github.com/consensys/gnark/std/hash"
 	"github.com/consensys/gnark/std/math/cmp"
-	stdEddsa "github.com/consensys/gnark/std/signature/eddsa"
-
-	tedwards "github.com/consensys/gnark-crypto/ecc/twistededwards"
 
 	"cast_iron/shared"
 	"cast_iron/voteropening"
 )
 
-/* ======================= Public ballot container ======================= */
+/* =============================== Circuit IO =============================== */
 
+// ElGamalCiphertext is one field element encrypted under the tallier's key.
 type ElGamalCiphertext struct {
 	C1 frontend.Variable
 	C2 frontend.Variable
 }
 
+// BallotCiphertexts is one entry β of BB′: the field-wise encryption of the
+// ballot (B1, B2, σB) of paper Section 5.2 — 16 + m + d ciphertexts for m
+// choices and a weight tree of depth d.
 type BallotCiphertexts struct {
-	// Field ciphertexts (ElGamal over scalar field)
-	EidC ElGamalCiphertext
+	EidC ElGamalCiphertext // election identifier
 
-	// B1 (keys) encrypted
-	PkAnchorX_C ElGamalCiphertext
-	PkAnchorY_C ElGamalCiphertext
-	PkVoteX_C   ElGamalCiphertext
+	// B1 = (pk_i, IC.pk, (σreg, r), t_reg)
+	PkVoteX_C   ElGamalCiphertext // voting credential pk_i
 	PkVoteY_C   ElGamalCiphertext
+	PkAnchorX_C ElGamalCiphertext // inalienable credential IC.pk
+	PkAnchorY_C ElGamalCiphertext
+	B3_RX_C     ElGamalCiphertext // σreg = Sig.Sign(IC.sk, pk_i)
+	B3_RY_C     ElGamalCiphertext
+	B3_S_C      ElGamalCiphertext
+	RegRandC    ElGamalCiphertext // CTC commitment randomness r
+	PosRegC     ElGamalCiphertext // t_reg: record position of the registration
 
-	// B2 choices encrypted (one-hot * weight)
-	ChoiceC []ElGamalCiphertext
+	// B2 = (π_W, w, ν, id_B)
+	LeafIndexC  ElGamalCiphertext   // π_W: leaf index in the weight tree ...
+	PathWeightC []ElGamalCiphertext // ... and sibling path, leaf level first
+	WeightC     ElGamalCiphertext   // w
+	ChoiceC     []ElGamalCiphertext // ν as a one-hot vector scaled by w
+	BallotIDC   ElGamalCiphertext   // id_B
 
-	// Encrypted registration position and voter-roll proof.
-	PosRegC     ElGamalCiphertext
-	LeafIndexC  ElGamalCiphertext
-	PathWeightC []ElGamalCiphertext
-
-	// RegRandC encrypts the CTC commitment randomness r of the registration
-	// (paper: B1 carries (σreg, r)); the circuit checks the opening
-	// rσ = x([H(σreg ∥ r)]G) against the record entry at posReg.
-	RegRandC ElGamalCiphertext
-
-	// Encrypted registered weight
-	WeightC ElGamalCiphertext
-
-	// B3 (anchor signature) encrypted
-	B3_RX_C ElGamalCiphertext
-	B3_RY_C ElGamalCiphertext
-	B3_S_C  ElGamalCiphertext
-
-	// B4 (vote signature) encrypted
+	// σB = Sig.Sign(sk_i, (B1, B2))
 	B4_RX_C ElGamalCiphertext
 	B4_RY_C ElGamalCiphertext
 	B4_S_C  ElGamalCiphertext
 }
 
-/* ======================== Phase 2: Ballot Views ======================== */
-
-// FilteredBallot represents A2[i] = v_i · A1[i]
-type FilteredBallot struct {
-	// Decrypted and filtered fields (all multiplied by v_i)
-	Eid       frontend.Variable
+// Row is a decrypted ballot projected onto what Deduplicate and Accumulate
+// read: (IC.pk, t_reg, id_B, ν·w), multiplied by the ballot's validity bit,
+// and the ballot's position t on BB′ (not masked: every row has its own t).
+type Row struct {
 	PkAnchorX frontend.Variable
 	PkAnchorY frontend.Variable
-	PkVoteX   frontend.Variable
-	PkVoteY   frontend.Variable
-	Choice    []frontend.Variable
 	PosReg    frontend.Variable
-	Weight    frontend.Variable
-
-	B3_RX frontend.Variable
-	B3_RY frontend.Variable
-	B3_S  frontend.Variable
-	B4_RX frontend.Variable
-	B4_RY frontend.Variable
-	B4_S  frontend.Variable
+	BallotID  frontend.Variable
+	Pos       frontend.Variable
+	Choice    []frontend.Variable
 }
 
-// SortedByVoterBallot represents A★ (sorted by pk_anchor, then posReg)
-// This is the final sorted view, combining what was A3 and A4
-// Same structure as FilteredBallot, but reordered lexicographically by (pk_anchor, posReg)
-type SortedByVoterBallot = FilteredBallot
-
-/* ============================== Circuit IO ============================== */
-
-type CastIronCircuit struct {
-	// Public context
-	ElectionID       frontend.Variable `gnark:",public"`
-	VoterRollRoot    frontend.Variable `gnark:",public"`
-	RegistrationRoot frontend.Variable `gnark:",public"`
-
-	// ElGamal pub params (public)
-	ElGamalG frontend.Variable `gnark:",public"`
-	ElGamalH frontend.Variable `gnark:",public"`
-
-	// Phase 1: A1 = Bulletin board (encrypted, public)
-	BulletinBoard []BallotCiphertexts `gnark:",public"`
-
-	// ElGamal secret key (secret)
-	ElGamalSk frontend.Variable `gnark:",secret"`
-
-	// Phase 1 Output: per-ballot validity (secret)
-	ValidityBits []frontend.Variable `gnark:",secret"`
-
-	// RecordOpenings[i] (secret): the record entry the tallier looked up at
-	// ballot i's decrypted posReg (ECDSA r-component rσ of the transaction,
-	// two 128-bit halves) and its sibling path to RegistrationRoot.
-	RecordOpenings []RecordOpening `gnark:",secret"`
-
-	// Phase 2 Outputs:
-	// A2 = Filtered ballots (v_i · decrypted, secret)
-	FilteredBallots []FilteredBallot `gnark:",secret"`
-
-	// A★ = Sorted by (pk_anchor, posReg) lexicographically (ascending, secret)
-	// This combines what were previously A3 and A4 into a single sorted view
-	SortedByVoterBallots []SortedByVoterBallot `gnark:",secret"`
-
-	// Phase 2 Final Output: Tally vector (public)
-	// T[j] = total votes for choice j (sum over all kept ballots)
-	Tally []frontend.Variable `gnark:",public"`
-}
-
-// RecordOpening is the tallier's private witness for one ballot: the record
-// entry (transaction ECDSA r-component rσ = RsigHi·2^128 + RsigLo) at the
-// ballot's registration position and its Merkle sibling path (leaf level
-// first) to RegistrationRoot = Mrk.Root(T_R).
+// RecordOpening is the tallier's lookup of one ballot's registration in the
+// public record: the leaf of T_R at the ballot's t_reg and its sibling path
+// (leaf level first).
 type RecordOpening struct {
-	RsigHi frontend.Variable
-	RsigLo frontend.Variable
-	Path   []frontend.Variable
+	Leaf frontend.Variable
+	Path []frontend.Variable
+}
+
+// CastIronCircuit is the tallying relation for a fixed number of ballots,
+// choices and tree depths (see NewSkeleton).
+type CastIronCircuit struct {
+	ElectionID       frontend.Variable   `gnark:",public"`
+	VoterRollRoot    frontend.Variable   `gnark:",public"` // Mrk.Root(T_W)
+	RegistrationRoot frontend.Variable   `gnark:",public"` // Mrk.Root(T_R)
+	ElGamalG         frontend.Variable   `gnark:",public"`
+	ElGamalH         frontend.Variable   `gnark:",public"` // pk_T
+	BulletinBoard    []BallotCiphertexts `gnark:",public"` // BB′, in posting order
+	Tally            []frontend.Variable `gnark:",public"` // X
+
+	ElGamalSk      frontend.Variable `gnark:",secret"` // sk_T
+	RecordOpenings []RecordOpening   `gnark:",secret"` // one per ballot
+	Sorted         []Row             `gnark:",secret"` // B_sorted
+}
+
+// NewSkeleton returns an unassigned circuit sized for numBallots ballots with
+// numChoices choices, a weight tree of depth weightDepth and a record tree of
+// depth recordDepth.
+func NewSkeleton(numBallots, numChoices, weightDepth, recordDepth int) *CastIronCircuit {
+	c := &CastIronCircuit{
+		BulletinBoard:  make([]BallotCiphertexts, numBallots),
+		Tally:          make([]frontend.Variable, numChoices),
+		RecordOpenings: make([]RecordOpening, numBallots),
+		Sorted:         make([]Row, numBallots),
+	}
+	for i := range c.BulletinBoard {
+		c.BulletinBoard[i].ChoiceC = make([]ElGamalCiphertext, numChoices)
+		c.BulletinBoard[i].PathWeightC = make([]ElGamalCiphertext, weightDepth)
+		c.RecordOpenings[i].Path = make([]frontend.Variable, recordDepth)
+		c.Sorted[i].Choice = make([]frontend.Variable, numChoices)
+	}
+	return c
 }
 
 // Fixed-base gadget configuration for the in-circuit CTC opening: 7-bit
 // windows, 256-bit scalar from the wide hash (see package voteropening).
 var openingGadgetOpts = voteropening.FixedBaseOptions{Window: voteropening.DefaultWindow}
 
-const openingScalarBits = voteropening.ScalarBits
+// Domain tag of the Fiat–Shamir challenge of the multiset check.
+const fiatShamirTag = 0xA23
 
-// NewSkeleton returns an unassigned circuit with all slices sized for
-// compilation: numBallots ballots with numChoices choices, a voter-roll
-// Merkle path of pathWeightLen elements (leaf + siblings) and a record tree
-// of height recordDepth.
-func NewSkeleton(numBallots, numChoices, pathWeightLen, recordDepth int) *CastIronCircuit {
-	c := &CastIronCircuit{}
-	c.BulletinBoard = make([]BallotCiphertexts, numBallots)
-	c.ValidityBits = make([]frontend.Variable, numBallots)
-	c.RecordOpenings = make([]RecordOpening, numBallots)
-	c.FilteredBallots = make([]FilteredBallot, numBallots)
-	c.SortedByVoterBallots = make([]SortedByVoterBallot, numBallots)
-	c.Tally = make([]frontend.Variable, numChoices)
-	for i := range c.BulletinBoard {
-		c.BulletinBoard[i].ChoiceC = make([]ElGamalCiphertext, numChoices)
-		c.BulletinBoard[i].PathWeightC = make([]ElGamalCiphertext, pathWeightLen)
-		c.RecordOpenings[i].Path = make([]frontend.Variable, recordDepth)
-		c.FilteredBallots[i].Choice = make([]frontend.Variable, numChoices)
-		c.SortedByVoterBallots[i].Choice = make([]frontend.Variable, numChoices)
-	}
-	return c
-}
+/* ============================= Small predicates ============================ */
 
-/* ============================== ElGamal helpers ============================= */
-// (see package shared)
+func newPoseidonHasher(api frontend.API) stdhash.FieldHasher { return shared.NewPoseidonHasher(api) }
 
-func expByBits(api frontend.API, base, exp frontend.Variable) frontend.Variable {
-	return shared.ExpByBits(api, base, exp)
-}
-
-func elgamalDecryptScalar(api frontend.API, c1, c2, sk frontend.Variable) frontend.Variable {
-	return shared.ElGamalDecryptScalar(api, c1, c2, sk)
-}
-
-func newPoseidonHasher(api frontend.API) stdhash.FieldHasher {
-	return shared.NewPoseidonHasher(api)
-}
-
-/* ============================== Messages ============================== */
-
-func buildMsgB3(api frontend.API, eid, pkVx, pkVy, pkAx, pkAy frontend.Variable) frontend.Variable {
-	h := newPoseidonHasher(api)
-	h.Write(eid)
-	h.Write(pkVx)
-	h.Write(pkVy)
-	h.Write(pkAx)
-	h.Write(pkAy)
-	return h.Sum()
-}
-
-func buildMsgB4(
-	api frontend.API,
-	eid, mrkRoot, regRoot frontend.Variable,
-	pkAx, pkAy, pkVx, pkVy frontend.Variable,
-	posReg frontend.Variable,
-	b2 []frontend.Variable,
-	weight frontend.Variable,
-	b3Rx, b3Ry, b3S frontend.Variable,
-) frontend.Variable {
-	h := newPoseidonHasher(api)
-	h.Write(eid)
-	h.Write(mrkRoot)
-	h.Write(regRoot)
-
-	// B1 (no path)
-	h.Write(pkAx)
-	h.Write(pkAy)
-	h.Write(pkVx)
-	h.Write(pkVy)
-	h.Write(posReg)
-
-	// B2 (no path)
-	for _, v := range b2 {
-		h.Write(v)
-	}
-	h.Write(weight)
-
-	// B3
-	h.Write(b3Rx)
-	h.Write(b3Ry)
-	h.Write(b3S)
-	return h.Sum()
-}
-
-/* ========================== Soft predicates (bits) ========================== */
-
-// eqBit returns 1 iff a==b else 0
+// eqBit returns 1 iff a = b.
 func eqBit(api frontend.API, a, b frontend.Variable) frontend.Variable {
-	return api.IsZero(api.Sub(a, b)) // 1 if zero, 0 otherwise
+	return api.IsZero(api.Sub(a, b))
 }
 
-// pointEqBit: 1 iff P==Q (both coords equal)
-func pointEqBit(api frontend.API, px, py, qx, qy frontend.Variable) frontend.Variable {
-	xb := eqBit(api, px, qx)
-	yb := eqBit(api, py, qy)
-	return api.Mul(xb, yb)
-}
-
-// boolAll returns AND of all bits in xs
+// boolAll returns the AND of the given bits.
 func boolAll(api frontend.API, xs ...frontend.Variable) frontend.Variable {
-	if len(xs) == 0 {
-		return 1
-	}
-	acc := xs[0]
-	for i := 1; i < len(xs); i++ {
-		acc = api.Mul(acc, xs[i])
+	acc := frontend.Variable(1)
+	for _, x := range xs {
+		acc = api.Mul(acc, x)
 	}
 	return acc
 }
 
-// singleChoiceBit: 1 iff exactly one entry in vec is nonzero
+// singleChoiceBit returns 1 iff exactly one entry of vec is nonzero.
 func singleChoiceBit(api frontend.API, vec []frontend.Variable) frontend.Variable {
-	sumZ := frontend.Variable(0)
+	nonzero := frontend.Variable(0)
 	for _, v := range vec {
-		z := api.Sub(1, api.IsZero(v)) // 1 iff v != 0
-		sumZ = api.Add(sumZ, z)
+		nonzero = api.Add(nonzero, api.Sub(1, api.IsZero(v)))
 	}
-	return eqBit(api, sumZ, 1)
+	return eqBit(api, nonzero, 1)
 }
 
-// sumEqualsBit: 1 iff sum(vec) == target
+// sumEqualsBit returns 1 iff Σ vec = target.
 func sumEqualsBit(api frontend.API, vec []frontend.Variable, target frontend.Variable) frontend.Variable {
 	sum := frontend.Variable(0)
 	for _, v := range vec {
@@ -270,446 +167,422 @@ func sumEqualsBit(api frontend.API, vec []frontend.Variable, target frontend.Var
 	return eqBit(api, sum, target)
 }
 
-// voterRollBit: 1 iff Merkle(root, path) verifies for leaf = Poseidon(pkAx, pkAy, weight).
-// SOFT verification: returns 0/1 without asserting (no proof failure on invalid Merkle proof)
-func voterRollBit(
-	api frontend.API,
-	root frontend.Variable,
-	path []frontend.Variable,
-	leafIndex frontend.Variable,
-	pkAx, pkAy, weight frontend.Variable,
-) frontend.Variable {
-	// Compute expected leaf value
-	hLeaf := newPoseidonHasher(api)
-	hLeaf.Write(pkAx, pkAy, weight)
-	computedLeaf := hLeaf.Sum()
-
-	// Verify that path[0] == computedLeaf (binds the key to this proof)
-	leafOk := eqBit(api, path[0], computedLeaf)
-
-	// Soft Merkle verification matching gnark's library behavior:
-	// 1. Hash path[0] with leafSum (single element hash)
-	h := newPoseidonHasher(api)
-	h.Write(path[0])
-	sum := h.Sum()
-
-	// 2. Fold up the tree
-	depth := len(path) - 1
-	if depth > 0 {
-		binLeaf := api.ToBinary(leafIndex, depth)
-		for i := 1; i < len(path); i++ {
-			// Match gnark's Select logic (lines 87-89 of verify.go)
-			d1 := api.Select(binLeaf[i-1], path[i], sum)
-			d2 := api.Select(binLeaf[i-1], sum, path[i])
-			h.Reset()
-			h.Write(d1, d2)
-			sum = h.Sum()
-		}
-	}
-
-	// 3. Check if computed root matches
-	rootOk := eqBit(api, sum, root)
-
-	// Both must match: correct leaf and valid Merkle path
-	return api.Mul(leafOk, rootOk)
+// fieldOrder compares field elements as the integers in [0, p) they
+// represent.  An element is decomposed once (canonically) and compared through
+// its two halves, each with a bounded comparator.
+type fieldOrder struct {
+	api  frontend.API
+	half int
+	cmp  *cmp.BoundedComparator
 }
 
-// registrationOpeningBit is the in-circuit CTC opening (paper Fig. 2, Open),
-// evaluated softly: it returns 1 iff
-//   - c = H(σreg ∥ r) ≠ 0, derived exactly as the registration client does
-//     (voteropening.ComputeOpening: Poseidon2 Merkle–Damgård continuation of
-//     H(B3) with r, then the tag, wide reduction mod the secp256k1 order),
-//   - x([c]G) = rσ, with rσ the record entry supplied by the tallier, and
-//   - Poseidon(1, posReg, rσ_hi, rσ_lo) is the leaf at index posReg of the
-//     record tree with root recordRoot (posReg < 2^depth).
+func newFieldOrder(api frontend.API) *fieldOrder {
+	half := (api.Compiler().FieldBitLen() + 1) / 2
+	bound := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(half)), big.NewInt(1))
+	return &fieldOrder{api: api, half: half, cmp: cmp.NewBoundedComparator(api, bound, false)}
+}
+
+// split returns the canonical bits of x (little-endian) and its halves
+// x = hi·2^half + lo.
+func (o *fieldOrder) split(x frontend.Variable) (xBits []frontend.Variable, hi, lo frontend.Variable) {
+	xBits = o.api.ToBinary(x, o.api.Compiler().FieldBitLen())
+	return xBits, o.api.FromBinary(xBits[o.half:]...), o.api.FromBinary(xBits[:o.half]...)
+}
+
+// splitConst is split for a constant.
+func (o *fieldOrder) splitConst(x *big.Int) (hi, lo *big.Int) {
+	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(o.half)), big.NewInt(1))
+	return new(big.Int).Rsh(x, uint(o.half)), new(big.Int).And(x, mask)
+}
+
+// less returns 1 iff a < b, the operands given by their halves.
+func (o *fieldOrder) less(aHi, aLo, bHi, bLo frontend.Variable) frontend.Variable {
+	return o.api.Add(o.cmp.IsLess(aHi, bHi), o.api.Mul(eqBit(o.api, aHi, bHi), o.cmp.IsLess(aLo, bLo)))
+}
+
+// lessEq returns 1 iff a ≤ b, the operands given by their halves.
+func (o *fieldOrder) lessEq(aHi, aLo, bHi, bLo frontend.Variable) frontend.Variable {
+	return o.api.Add(o.cmp.IsLess(aHi, bHi), o.api.Mul(eqBit(o.api, aHi, bHi), o.cmp.IsLessEq(aLo, bLo)))
+}
+
+/* ============================== Validate: gadgets =========================== */
+
+// voterRollBit is weight validity: 1 iff (IC.pk, w) is the leaf at leafIndex
+// of the weight tree with the given root.  The tree hashes a leaf
+// L = Poseidon(IC.pk, w) into its level-0 node Poseidon(L).  The index is
+// range-checked softly: an out-of-range index yields 0, never an
+// unsatisfiable constraint.
+func voterRollBit(api frontend.API, root, pkAx, pkAy, weight, leafIndex frontend.Variable, path []frontend.Variable) frontend.Variable {
+	h := newPoseidonHasher(api)
+	h.Write(pkAx, pkAy, weight)
+	leaf := h.Sum()
+	h.Reset()
+	h.Write(leaf)
+	node := h.Sum()
+
+	idxBits := api.ToBinary(leafIndex, api.Compiler().FieldBitLen())
+	high := frontend.Variable(0)
+	for _, b := range idxBits[len(path):] {
+		high = api.Add(high, b)
+	}
+	inRange := api.IsZero(high)
+
+	for k := range path {
+		left := api.Select(idxBits[k], path[k], node)
+		right := api.Select(idxBits[k], node, path[k])
+		h.Reset()
+		h.Write(left, right)
+		node = h.Sum()
+	}
+	return api.Mul(inRange, eqBit(api, node, root))
+}
+
+// registrationOpeningBit is registration validity: CTC.Open((pk_i, σreg), r,
+// t_reg) against the record committed in recordRoot (paper Fig. 2).  It
+// returns 1 iff
+//   - the nonce c = H(pk_i ∥ σreg ∥ r), derived exactly as the registration
+//     client does (voteropening.ComputeOpeningMsg), is nonzero,
+//   - t_reg is a position of the record tree, and
+//   - the leaf of the record tree at t_reg is the commitment
+//     Poseidon(1, t_reg, rσ) to rσ = x([c]G).
 //
-// Every sub-check is a bit, so an invalid or garbage ballot never makes the
-// circuit unsatisfiable; the only inputs the tallier does not decrypt from the
-// ballot are rσ and the path, which it looks up in the public record.
-func registrationOpeningBit(api frontend.API, g *voteropening.FixedBaseGadget, hB3, r, posReg, recordRoot frontend.Variable, rec RecordOpening) (frontend.Variable, error) {
-	h := shared.NewPoseidonHasherFromState(api, hB3)
-	h.Write(r)
+// The leaf is supplied by the tallier (rec).  Its membership at index t_reg is
+// asserted, not merely tested, whenever t_reg is in range: the tallier cannot
+// present anything but the true record entry, so it has no way to make a
+// valid registration fail.  For an out-of-range t_reg the opening is ignored.
+func registrationOpeningBit(
+	api frontend.API, g *voteropening.FixedBaseGadget,
+	pkVx, pkVy, sigRx, sigRy, sigS, r, posReg, recordRoot frontend.Variable,
+	rec RecordOpening,
+) (frontend.Variable, error) {
+	h := newPoseidonHasher(api)
+	h.Write(pkVx, pkVy, sigRx, sigRy, sigS, r)
 	h1 := h.Sum()
 	h.Write(voteropening.WideHashTag)
 	h2 := h.Sum()
-	bits, nonzero := g.NonceBitsWide(h1, h2)
-	P, err := g.MulBits(bits)
+	nonceBits, nonzero := g.NonceBitsWide(h1, h2)
+	P, err := g.MulBits(nonceBits)
 	if err != nil {
 		return nil, err
 	}
-	xOk := g.XEqualsBit(P, rec.RsigHi, rec.RsigLo)
+	rsigHi, rsigLo := g.XHalves(P)
 
-	entry := shared.EntryCommitment(api, posReg, rec.RsigHi, rec.RsigLo)
-	fieldBits := api.Compiler().FieldBitLen()
-	posBits := api.ToBinary(posReg, fieldBits)
+	posBits := api.ToBinary(posReg, api.Compiler().FieldBitLen())
+	depth := len(rec.Path)
 	high := frontend.Variable(0)
-	for k := len(rec.Path); k < fieldBits; k++ {
-		high = api.Add(high, posBits[k])
+	for _, b := range posBits[depth:] {
+		high = api.Add(high, b)
 	}
 	inRange := api.IsZero(high)
-	root := shared.MerkleRootFromPath(api, entry, rec.Path, posBits[:len(rec.Path)])
-	rootOk := eqBit(api, root, recordRoot)
-	return boolAll(api, nonzero, xOk, inRange, rootOk), nil
+	root := shared.MerkleRootFromPath(api, rec.Leaf, rec.Path, posBits[:depth])
+	api.AssertIsEqual(api.Mul(inRange, api.Sub(root, recordRoot)), 0)
+
+	committed := eqBit(api, rec.Leaf, shared.EntryCommitment(api, posReg, rsigHi, rsigLo))
+	return boolAll(api, nonzero, inRange, committed), nil
 }
 
-// eddsaVerifyBit: soft EdDSA verify over BN254 Edwards.
-// Returns 1 iff:
-//   - R is on the curve
-//   - [s]G == R + [h]A
+// onCurveBit returns 1 iff (x, y) satisfies a·x² + y² = 1 + d·x²·y².
+func onCurveBit(api frontend.API, params *twistededwards.CurveParams, x, y frontend.Variable) frontend.Variable {
+	xx := api.Mul(x, x)
+	yy := api.Mul(y, y)
+	lhs := api.Add(api.Mul(params.A, xx), yy)
+	rhs := api.Add(1, api.Mul(params.D, xx, yy))
+	return eqBit(api, lhs, rhs)
+}
+
+// doubleBaseMul returns [Σ b1[i]·2^i]·p1 + [Σ b2[i]·2^i]·p2 (Straus–Shamir,
+// bits little-endian).  It only uses the complete addition law, so for points
+// on the curve it has no exceptional case and no unsatisfiable constraint.
+func doubleBaseMul(api frontend.API, curve twistededwards.Curve, p1, p2 twistededwards.Point, b1, b2 []frontend.Variable) twistededwards.Point {
+	sum := curve.Add(p1, p2)
+	pick := func(i int) twistededwards.Point {
+		return twistededwards.Point{
+			X: api.Lookup2(b1[i], b2[i], 0, p1.X, p2.X, sum.X),
+			Y: api.Lookup2(b1[i], b2[i], 1, p1.Y, p2.Y, sum.Y),
+		}
+	}
+	n := len(b1)
+	res := pick(n - 1)
+	for i := n - 2; i >= 0; i-- {
+		res = curve.Add(curve.Double(res), pick(i))
+	}
+	return res
+}
+
+// eddsaVerifyBit is a soft EdDSA verification on the twisted Edwards curve of
+// the proving field: it returns 1 iff A and R are curve points, S ≤ ℓ (the
+// group order) and [c]([S]B − [h]A − R) is the identity, with
+// h = Poseidon(R, A, msg) and c the cofactor.
 //
-// else returns 0.
-func eddsaVerifyBit(
-	api frontend.API,
-	curve twistededwards.Curve,
-	sig stdEddsa.Signature,
-	msg frontend.Variable,
-	pub stdEddsa.PublicKey,
-) frontend.Variable {
-	// 1. H(R, A, M) with Poseidon
-	hPoseidon := newPoseidonHasher(api)
-	hPoseidon.Write(sig.R.X, sig.R.Y, pub.A.X, pub.A.Y, msg)
-	hRAM := hPoseidon.Sum()
-
+// A and R come out of a ciphertext and can be anything.  Points that are not
+// on the curve are replaced by the base point before any curve arithmetic
+// (and the result forced to 0), and the scalar multiplications use only the
+// complete addition law, so every constraint below is satisfiable for every
+// input.  (gnark's Curve.ScalarMul is not: it asserts a hinted result, which
+// fails for points outside the prime-order subgroup.)
+func eddsaVerifyBit(api frontend.API, curve twistededwards.Curve, ord *fieldOrder, rx, ry, s, ax, ay, msg frontend.Variable) frontend.Variable {
 	params := curve.Params()
+	base := twistededwards.Point{X: params.Base[0], Y: params.Base[1]}
 
-	// 2. base point from curve params (this is what gnark does)
-	base := twistededwards.Point{
-		X: params.Base[0],
-		Y: params.Base[1],
+	onA := onCurveBit(api, params, ax, ay)
+	onR := onCurveBit(api, params, rx, ry)
+	A := twistededwards.Point{X: api.Select(onA, ax, base.X), Y: api.Select(onA, ay, base.Y)}
+	R := twistededwards.Point{X: api.Select(onR, rx, base.X), Y: api.Select(onR, ry, base.Y)}
+
+	h := newPoseidonHasher(api)
+	h.Write(rx, ry, ax, ay, msg)
+	hBits, _, _ := ord.split(h.Sum())
+
+	sBits, sHi, sLo := ord.split(s)
+	orderHi, orderLo := ord.splitConst(params.Order)
+	sInRange := ord.lessEq(sHi, sLo, orderHi, orderLo)
+
+	// Q = [S]B − [h]A − R
+	Q := doubleBaseMul(api, curve, base, curve.Neg(A), sBits, hBits)
+	Q = curve.Add(Q, curve.Neg(R))
+	for c := params.Cofactor.Uint64(); c > 1; c >>= 1 {
+		Q = curve.Double(Q)
 	}
-
-	// 3. check S <= order  (soft)
-	sLeOrder := cmp.IsLessOrEqual(api, sig.S, params.Order)
-
-	// 4. compute [S]B - [h]A
-	negA := curve.Neg(pub.A)
-	sB := curve.ScalarMul(base, sig.S)   // [S]B
-	hNegA := curve.ScalarMul(negA, hRAM) // [-h]A = [h](-A)
-	Q := curve.Add(sB, hNegA)            // Q = [S]B - [h]A
-
-	// 5. Q = Q - R   (official:  Q = curve.Add(curve.Neg(Q), sig.R))
-	//    we'll do it as Q + (-R)
-	negR := curve.Neg(sig.R)
-	Q = curve.Add(Q, negR)
-
-	// 6. multiply by cofactor (same pattern as official)
-	//    we do it unconditionally, then test if result is identity
-	cofactor := params.Cofactor.Uint64()
-	switch cofactor {
-	case 4:
-		Q = curve.Double(curve.Double(Q))
-	case 8:
-		Q = curve.Double(curve.Double(curve.Double(Q)))
-	default:
-		// if it's something else, we just won't cofactor-clear;
-		// the identity check below will likely fail -> bit=0
-	}
-
-	// 7. final check: Q == identity (0,1)
-	onId := pointEqBit(api, Q.X, Q.Y, 0, 1)
-
-	// 8. extra safety: reject obviously off-curve R
-	//    (since your test sometimes puts random scalars in R for bad sigs)
-	//    This keeps the add gadgets happy and makes bad sigs -> 0.
-	x2 := api.Mul(sig.R.X, sig.R.X)
-	y2 := api.Mul(sig.R.Y, sig.R.Y)
-	ax2 := api.Mul(params.A, x2)
-	lhs := api.Add(ax2, y2)
-	x2y2 := api.Mul(x2, y2)
-	dx2y2 := api.Mul(params.D, x2y2)
-	rhs := api.Add(1, dx2y2)
-	onCurveR := api.IsZero(api.Sub(lhs, rhs))
-
-	// 9. all conditions must hold
-	return api.Mul(api.Mul(sLeOrder, onCurveR), onId)
+	isIdentity := api.Mul(api.IsZero(Q.X), eqBit(api, Q.Y, 1))
+	return boolAll(api, onA, onR, sInRange, isIdentity)
 }
 
-/* =============================== Define ================================= */
+/* ================================= Define ================================== */
+
 func (c *CastIronCircuit) Define(api frontend.API) error {
-	// curve (for ops only; we avoid any Assert* from gadgets in ballot path)
-	curve, err := twistededwards.NewEdCurve(api, tedwards.BN254)
-	if err != nil {
-		return err
-	}
-
 	n := len(c.BulletinBoard)
-	if n == 0 {
-		return nil
+	m := len(c.Tally)
+	if n == 0 || m == 0 {
+		return errors.New("the circuit needs at least one ballot and one choice")
 	}
-	numChoices := len(c.BulletinBoard[0].ChoiceC)
-
-	// Prepare output vectors with proper allocation
-	if len(c.ValidityBits) != n {
-		c.ValidityBits = make([]frontend.Variable, n)
+	if len(c.RecordOpenings) != n || len(c.Sorted) != n {
+		return fmt.Errorf("RecordOpenings and Sorted must have one entry per ballot (%d)", n)
 	}
-
-	// Allocate A2 (FilteredBallots) with Choice slices
-	if len(c.FilteredBallots) != n {
-		c.FilteredBallots = make([]FilteredBallot, n)
+	recordDepth := len(c.RecordOpenings[0].Path)
+	if recordDepth < 1 {
+		return errors.New("the record tree needs depth ≥ 1")
 	}
-	for i := 0; i < n; i++ {
-		if len(c.FilteredBallots[i].Choice) != numChoices {
-			c.FilteredBallots[i].Choice = make([]frontend.Variable, numChoices)
-		}
-	}
+	fieldBits := api.Compiler().FieldBitLen()
 
-	if len(c.RecordOpenings) != n {
-		return fmt.Errorf("RecordOpenings must have one entry per ballot (got %d, want %d)", len(c.RecordOpenings), n)
-	}
-
-	// Global key relation (soft): okKey = 1 iff H == G^sk
-	okKey := eqBit(api, expByBits(api, c.ElGamalG, c.ElGamalSk), c.ElGamalH)
-
-	// Fixed-base secp256k1 gadget for the CTC openings (tables built once).
-	opening, err := voteropening.NewFixedBaseGadget(api, openingGadgetOpts, openingScalarBits)
+	curve, err := twistededwards.NewEdCurve(api, shared.EdwardsCurveID(api))
 	if err != nil {
 		return err
 	}
+	if co := curve.Params().Cofactor; !co.IsUint64() || bits.OnesCount64(co.Uint64()) != 1 {
+		return errors.New("unsupported Edwards cofactor")
+	}
+	opening, err := voteropening.NewFixedBaseGadget(api, openingGadgetOpts, voteropening.ScalarBits)
+	if err != nil {
+		return err
+	}
+	ord := newFieldOrder(api)
 
-	/* ======================= Decrypt Once & Process ======================= */
-	// Decrypt all ballots once, then use for both validity checks and filtering
+	// pk_T = Enc.DerivePk(sk_T).  Asserted: a wrong key must not yield a proof
+	// (with a soft check it would yield one for the empty tally).
+	skBits := api.ToBinary(c.ElGamalSk, fieldBits)
+	api.AssertIsEqual(shared.ExpBits(api, c.ElGamalG, skBits), c.ElGamalH)
+	dec := func(ct ElGamalCiphertext) frontend.Variable {
+		return shared.ElGamalDecryptBits(api, ct.C1, ct.C2, skBits)
+	}
 
-	for i := 0; i < n; i++ {
-		ct := c.BulletinBoard[i]
+	/* ---------------- Decryption and Validate, ballot by ballot ---------------- */
 
-		/* 1) Decrypt all fields */
-		eidDec := elgamalDecryptScalar(api, ct.EidC.C1, ct.EidC.C2, c.ElGamalSk)
-		pkAx := elgamalDecryptScalar(api, ct.PkAnchorX_C.C1, ct.PkAnchorX_C.C2, c.ElGamalSk)
-		pkAy := elgamalDecryptScalar(api, ct.PkAnchorY_C.C1, ct.PkAnchorY_C.C2, c.ElGamalSk)
-		pkVx := elgamalDecryptScalar(api, ct.PkVoteX_C.C1, ct.PkVoteX_C.C2, c.ElGamalSk)
-		pkVy := elgamalDecryptScalar(api, ct.PkVoteY_C.C1, ct.PkVoteY_C.C2, c.ElGamalSk)
-		weightDec := elgamalDecryptScalar(api, ct.WeightC.C1, ct.WeightC.C2, c.ElGamalSk)
-		posRegDec := elgamalDecryptScalar(api, ct.PosRegC.C1, ct.PosRegC.C2, c.ElGamalSk)
-		leafIndexDec := elgamalDecryptScalar(api, ct.LeafIndexC.C1, ct.LeafIndexC.C2, c.ElGamalSk)
-
-		choices := make([]frontend.Variable, numChoices)
-		for j := 0; j < numChoices; j++ {
-			choices[j] = elgamalDecryptScalar(api, ct.ChoiceC[j].C1, ct.ChoiceC[j].C2, c.ElGamalSk)
+	rows := make([]Row, n) // B_dec: masked rows, in posting order
+	for i := range c.BulletinBoard {
+		ct := &c.BulletinBoard[i]
+		if len(ct.ChoiceC) != m || len(c.Sorted[i].Choice) != m {
+			return fmt.Errorf("ballot %d: expected %d choices", i, m)
+		}
+		if len(c.RecordOpenings[i].Path) != recordDepth {
+			return fmt.Errorf("ballot %d: record path length differs", i)
 		}
 
-		regRand := elgamalDecryptScalar(api, ct.RegRandC.C1, ct.RegRandC.C2, c.ElGamalSk)
-		b3Rx := elgamalDecryptScalar(api, ct.B3_RX_C.C1, ct.B3_RX_C.C2, c.ElGamalSk)
-		b3Ry := elgamalDecryptScalar(api, ct.B3_RY_C.C1, ct.B3_RY_C.C2, c.ElGamalSk)
-		b3S := elgamalDecryptScalar(api, ct.B3_S_C.C1, ct.B3_S_C.C2, c.ElGamalSk)
-		b4Rx := elgamalDecryptScalar(api, ct.B4_RX_C.C1, ct.B4_RX_C.C2, c.ElGamalSk)
-		b4Ry := elgamalDecryptScalar(api, ct.B4_RY_C.C1, ct.B4_RY_C.C2, c.ElGamalSk)
-		b4S := elgamalDecryptScalar(api, ct.B4_S_C.C1, ct.B4_S_C.C2, c.ElGamalSk)
+		eid := dec(ct.EidC)
+		pkVx, pkVy := dec(ct.PkVoteX_C), dec(ct.PkVoteY_C)
+		pkAx, pkAy := dec(ct.PkAnchorX_C), dec(ct.PkAnchorY_C)
+		sigRegRx, sigRegRy, sigRegS := dec(ct.B3_RX_C), dec(ct.B3_RY_C), dec(ct.B3_S_C)
+		regRand := dec(ct.RegRandC)
+		posReg := dec(ct.PosRegC)
+		leafIndex := dec(ct.LeafIndexC)
+		path := make([]frontend.Variable, len(ct.PathWeightC))
+		for k := range path {
+			path[k] = dec(ct.PathWeightC[k])
+		}
+		weight := dec(ct.WeightC)
+		choices := make([]frontend.Variable, m)
+		for j := range choices {
+			choices[j] = dec(ct.ChoiceC[j])
+		}
+		ballotID := dec(ct.BallotIDC)
+		sigBRx, sigBRy, sigBS := dec(ct.B4_RX_C), dec(ct.B4_RY_C), dec(ct.B4_S_C)
 
-		/* 2) Phase 1: Validity Checks using decrypted values */
-		okEid := eqBit(api, eidDec, c.ElectionID)
+		// The ballot belongs to this election and names a credential.  IC.pk =
+		// (0, 0) is not a curve point; excluding it explicitly keeps the block
+		// of masked (all-zero) rows free of valid ballots.
+		okEid := eqBit(api, eid, c.ElectionID)
+		okKey := api.Sub(1, api.Mul(api.IsZero(pkAx), api.IsZero(pkAy)))
 
-		// Rebuild keys/signatures for validity checks
-		pkAnchor := stdEddsa.PublicKey{A: twistededwards.Point{X: pkAx, Y: pkAy}}
-		pkVote := stdEddsa.PublicKey{A: twistededwards.Point{X: pkVx, Y: pkVy}}
-		sigB3 := stdEddsa.Signature{R: twistededwards.Point{X: b3Rx, Y: b3Ry}, S: b3S}
-		sigB4 := stdEddsa.Signature{R: twistededwards.Point{X: b4Rx, Y: b4Ry}, S: b4S}
-
-		// Soft predicates (bits)
+		// Well-formed choice: one-hot, scaled by the weight.
 		okOneHot := singleChoiceBit(api, choices)
-		okWeight := sumEqualsBit(api, choices, weightDec)
-		pathWeightDec := make([]frontend.Variable, len(ct.PathWeightC))
-		for j := range ct.PathWeightC {
-			pathWeightDec[j] = elgamalDecryptScalar(api, ct.PathWeightC[j].C1, ct.PathWeightC[j].C2, c.ElGamalSk)
-		}
-		okVoterRoll := voterRollBit(api, c.VoterRollRoot, pathWeightDec, leafIndexDec, pkAx, pkAy, weightDec)
+		okWeight := sumEqualsBit(api, choices, weight)
 
-		// Registration validity: the CTC opening of (σreg = B3, r) against the
-		// record entry at posReg (soft bit).
-		hB3 := shared.HashB3(api, b3Rx, b3Ry, b3S)
-		regOk, err := registrationOpeningBit(api, opening, hB3, regRand, posRegDec, c.RegistrationRoot, c.RecordOpenings[i])
+		// Weight validity: π_W verifies against Mrk.Root(T_W) for (IC.pk, w).
+		okRoll := voterRollBit(api, c.VoterRollRoot, pkAx, pkAy, weight, leafIndex, path)
+
+		// Registration validity: CTC.Open((pk_i, σreg), r, t_reg).
+		okReg, err := registrationOpeningBit(api, opening, pkVx, pkVy, sigRegRx, sigRegRy, sigRegS,
+			regRand, posReg, c.RegistrationRoot, c.RecordOpenings[i])
 		if err != nil {
 			return err
 		}
 
-		msgB3 := buildMsgB3(api, c.ElectionID, pkVx, pkVy, pkAx, pkAy)
-		okSigB3 := eddsaVerifyBit(api, curve, sigB3, msgB3, pkAnchor)
+		// Registration binding: σreg verifies under IC.pk over (eid, pk_i, IC.pk).
+		h := newPoseidonHasher(api)
+		h.Write(c.ElectionID, pkVx, pkVy, pkAx, pkAy)
+		okSigReg := eddsaVerifyBit(api, curve, ord, sigRegRx, sigRegRy, sigRegS, pkAx, pkAy, h.Sum())
 
-		msgB4 := buildMsgB4(api, c.ElectionID, c.VoterRollRoot, c.RegistrationRoot,
-			pkAx, pkAy, pkVx, pkVy, posRegDec, choices, weightDec, b3Rx, b3Ry, b3S)
-		okSigB4 := eddsaVerifyBit(api, curve, sigB4, msgB4, pkVote)
+		// Ballot authenticity: σB verifies under pk_i over the ballot.
+		h.Reset()
+		h.Write(c.ElectionID, pkAx, pkAy, pkVx, pkVy, posReg)
+		h.Write(choices...)
+		h.Write(weight, sigRegRx, sigRegRy, sigRegS, ballotID)
+		okSigB := eddsaVerifyBit(api, curve, ord, sigBRx, sigBRy, sigBS, pkVx, pkVy, h.Sum())
 
-		// Combine all validity checks
-		c.ValidityBits[i] = boolAll(api,
-			okKey,       // global key relation must hold
-			okEid,       // binds to this election
-			okOneHot,    // exactly one choice
-			okWeight,    // weight matches sum
-			okVoterRoll, // voter roll inclusion
-			regOk,       // registration opening (CTC.Open against the record)
-			okSigB3,     // anchor signature
-			okSigB4,     // vote signature
-		)
-		api.AssertIsBoolean(c.ValidityBits[i])
+		v := boolAll(api, okEid, okKey, okOneHot, okWeight, okRoll, okReg, okSigReg, okSigB)
 
-		/* 3) Phase 2: A2 = Filtered Ballots (v_i · decrypted values) */
-		v := c.ValidityBits[i]
-
-		c.FilteredBallots[i].Eid = api.Mul(v, eidDec)
-		c.FilteredBallots[i].PkAnchorX = api.Mul(v, pkAx)
-		c.FilteredBallots[i].PkAnchorY = api.Mul(v, pkAy)
-		c.FilteredBallots[i].PkVoteX = api.Mul(v, pkVx)
-		c.FilteredBallots[i].PkVoteY = api.Mul(v, pkVy)
-		c.FilteredBallots[i].PosReg = api.Mul(v, posRegDec)
-		c.FilteredBallots[i].Weight = api.Mul(v, weightDec)
-
-		for j := 0; j < numChoices; j++ {
-			c.FilteredBallots[i].Choice[j] = api.Mul(v, choices[j])
+		// Masked decryption: an invalid ballot becomes an all-zero row.
+		rows[i] = Row{
+			PkAnchorX: api.Mul(v, pkAx),
+			PkAnchorY: api.Mul(v, pkAy),
+			PosReg:    api.Mul(v, posReg),
+			BallotID:  api.Mul(v, ballotID),
+			Pos:       i + 1,
+			Choice:    make([]frontend.Variable, m),
 		}
-
-		c.FilteredBallots[i].B3_RX = api.Mul(v, b3Rx)
-		c.FilteredBallots[i].B3_RY = api.Mul(v, b3Ry)
-		c.FilteredBallots[i].B3_S = api.Mul(v, b3S)
-		c.FilteredBallots[i].B4_RX = api.Mul(v, b4Rx)
-		c.FilteredBallots[i].B4_RY = api.Mul(v, b4Ry)
-		c.FilteredBallots[i].B4_S = api.Mul(v, b4S)
+		for j := range choices {
+			rows[i].Choice[j] = api.Mul(v, choices[j])
+		}
 	}
 
-	/* ======================= Phase 2: A2 → A3 (Sort by voter) ======================= */
-	// A3 is A2 sorted by pk_anchor (ascending)
-	// Need to verify: 1) A3 is sorted and 2) SetEq(A2, A3)
+	/* ------------------------- Deduplicate: sorted view ------------------------ */
+	// The prover supplies B_sorted; the circuit checks that it is B_dec in
+	// strictly increasing (IC.pk, t_reg, id_B, t) order.  Positions are
+	// distinct, so this order is total and B_sorted is unique.
 
-	// Helper: hash a ballot row with domain separation
-	const rowDom = 777
-	rowHash := func(rb FilteredBallot) frontend.Variable {
+	sorted := c.Sorted
+	posBits := bits.Len(uint(n))
+	posCmp := cmp.NewBoundedComparator(api, big.NewInt(int64(1)<<uint(posBits)-1), false)
+	regCmp := cmp.NewBoundedComparator(api, new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), uint(recordDepth)), big.NewInt(1)), false)
+
+	type halves struct{ xHi, xLo, yHi, yLo, idHi, idLo frontend.Variable }
+	keys := make([]halves, n)
+	for i := range sorted {
+		_, keys[i].xHi, keys[i].xLo = ord.split(sorted[i].PkAnchorX)
+		_, keys[i].yHi, keys[i].yLo = ord.split(sorted[i].PkAnchorY)
+		_, keys[i].idHi, keys[i].idLo = ord.split(sorted[i].BallotID)
+		// Ranges the bounded comparators rely on (they hold for B_dec: a valid
+		// ballot has t_reg inside the record tree, a masked row has 0).
+		api.ToBinary(sorted[i].PosReg, recordDepth)
+		api.ToBinary(sorted[i].Pos, posBits)
+	}
+
+	samePk := make([]frontend.Variable, n)  // row i has the IC.pk of row i−1
+	sameKey := make([]frontend.Variable, n) // ... and the same (t_reg, id_B)
+	samePk[0], sameKey[0] = 0, 0
+	for i := 1; i < n; i++ {
+		a, b, ka, kb := sorted[i-1], sorted[i], keys[i-1], keys[i]
+		xEq := eqBit(api, a.PkAnchorX, b.PkAnchorX)
+		yEq := eqBit(api, a.PkAnchorY, b.PkAnchorY)
+		regEq := eqBit(api, a.PosReg, b.PosReg)
+		idEq := eqBit(api, a.BallotID, b.BallotID)
+		xLt := ord.less(ka.xHi, ka.xLo, kb.xHi, kb.xLo)
+		yLt := ord.less(ka.yHi, ka.yLo, kb.yHi, kb.yLo)
+		regLt := regCmp.IsLess(a.PosReg, b.PosReg)
+		idLt := ord.less(ka.idHi, ka.idLo, kb.idHi, kb.idLo)
+		posLt := posCmp.IsLess(a.Pos, b.Pos)
+
+		// (x, y, t_reg, id_B, t)[i−1] < (x, y, t_reg, id_B, t)[i], lexicographically
+		lt := api.Add(idLt, api.Mul(idEq, posLt))
+		lt = api.Add(regLt, api.Mul(regEq, lt))
+		lt = api.Add(yLt, api.Mul(yEq, lt))
+		lt = api.Add(xLt, api.Mul(xEq, lt))
+		api.AssertIsEqual(lt, 1)
+
+		samePk[i] = api.Mul(xEq, yEq)
+		sameKey[i] = boolAll(api, samePk[i], regEq, idEq)
+	}
+
+	// Multiset equality of B_dec and B_sorted by a grand product at a
+	// Fiat–Shamir challenge derived from the election identifier, the
+	// weight-tree root and the digests of both arrays.
+	rowHash := func(r Row) frontend.Variable {
 		h := newPoseidonHasher(api)
-		h.Write(rowDom)
-		h.Write(rb.Eid)
-		h.Write(rb.PkAnchorX)
-		h.Write(rb.PkAnchorY)
-		h.Write(rb.PkVoteX)
-		h.Write(rb.PkVoteY)
-		h.Write(rb.PosReg)
-		h.Write(rb.Weight)
-		for j := 0; j < numChoices; j++ {
-			h.Write(rb.Choice[j])
-		}
-		h.Write(rb.B3_RX)
-		h.Write(rb.B3_RY)
-		h.Write(rb.B3_S)
-		h.Write(rb.B4_RX)
-		h.Write(rb.B4_RY)
-		h.Write(rb.B4_S)
+		h.Write(r.PkAnchorX, r.PkAnchorY, r.PosReg, r.BallotID, r.Pos)
+		h.Write(r.Choice...)
 		return h.Sum()
 	}
-
-	/* ======================= Phase 2: A2 → A★ (Sort by voter + registration) ======================= */
-	// A★ = SortedByVoterBallots is sorted lexicographically by (pk_anchor, posReg)
-	// This single step combines what were A3 (sort by pk) and A4 (sort by posReg within voter)
-	// Need to verify: 1) A★ is globally sorted and 2) SetEq(A2, A★)
-
-	// Get field bit length (254 on BN254)
-	fieldBits := int(api.Compiler().FieldBitLen())
-
-	// Range-bind all pk_anchor coordinates and posReg for A★
+	decHashes := make([]frontend.Variable, n)
+	sortedHashes := make([]frontend.Variable, n)
+	decDigest, sortedDigest := newPoseidonHasher(api), newPoseidonHasher(api)
 	for i := 0; i < n; i++ {
-		api.ToBinary(c.SortedByVoterBallots[i].PkAnchorX, fieldBits)
-		api.ToBinary(c.SortedByVoterBallots[i].PkAnchorY, fieldBits)
-		api.ToBinary(c.SortedByVoterBallots[i].PosReg, fieldBits)
+		decHashes[i] = rowHash(rows[i])
+		sortedHashes[i] = rowHash(sorted[i])
+		decDigest.Write(decHashes[i])
+		sortedDigest.Write(sortedHashes[i])
 	}
-
-	// 1) Verify global lexicographic sortedness: (pkX, pkY, posReg) sorted ascending
-	// This enforces: same-voter rows are contiguous AND sorted by posReg within each voter
-	// 1) Verify global lexicographic sortedness: (pkX, pkY, posReg) sorted ascending
-	for i := 0; i < n-1; i++ {
-		x1 := c.SortedByVoterBallots[i].PkAnchorX
-		y1 := c.SortedByVoterBallots[i].PkAnchorY
-		p1 := c.SortedByVoterBallots[i].PosReg
-		x2 := c.SortedByVoterBallots[i+1].PkAnchorX
-		y2 := c.SortedByVoterBallots[i+1].PkAnchorY
-		p2 := c.SortedByVoterBallots[i+1].PosReg
-
-		// Lexicographic comparison helpers
-		// Note: Variables are already range-bound to fieldBits above
-		xLT := cmp.IsLess(api, x1, x2)
-		xEQ := eqBit(api, x1, x2)
-		yLT := cmp.IsLess(api, y1, y2)
-		yEQ := eqBit(api, y1, y2)
-		pLE := cmp.IsLessOrEqual(api, p1, p2)
-
-		// (x1,y1,p1) ≤_lex (x2,y2,p2)
-		sorted := api.Add(
-			xLT,
-			api.Mul(
-				xEQ,
-				api.Add(
-					yLT,
-					api.Mul(yEQ, pLE),
-				),
-			),
-		)
-		api.AssertIsEqual(sorted, 1)
-	}
-
-	// 2) Verify multiset equality: SetEq(A2, A★) using Fiat-Shamir product check
-	// Derive challenge α from public context with domain separation
-	const tagA2toAstar = 0xA23 // Domain tag for A2→A★ check
 	hAlpha := newPoseidonHasher(api)
-	hAlpha.Write(tagA2toAstar, c.ElectionID, c.VoterRollRoot, c.RegistrationRoot)
+	hAlpha.Write(fiatShamirTag, c.ElectionID, c.VoterRollRoot, decDigest.Sum(), sortedDigest.Sum())
 	alpha := hAlpha.Sum()
-
-	// Product check: ∏(hash(A2[i]) + α) == ∏(hash(A★[i]) + α)
-	prodA2 := frontend.Variable(1)
-	prodAstar := frontend.Variable(1)
-
+	prodDec, prodSorted := frontend.Variable(1), frontend.Variable(1)
 	for i := 0; i < n; i++ {
-		h2 := rowHash(c.FilteredBallots[i])
-		hStar := rowHash(c.SortedByVoterBallots[i])
-		prodA2 = api.Mul(prodA2, api.Add(h2, alpha))
-		prodAstar = api.Mul(prodAstar, api.Add(hStar, alpha))
+		prodDec = api.Mul(prodDec, api.Add(decHashes[i], alpha))
+		prodSorted = api.Mul(prodSorted, api.Add(sortedHashes[i], alpha))
 	}
+	api.AssertIsEqual(prodDec, prodSorted)
 
-	// Multiset equality: products must match
-	api.AssertIsEqual(prodA2, prodAstar)
+	/* ---------------------- Deduplicate (scan) and Accumulate ------------------ */
+	// One pass over B_sorted.  Within a voter's block (equal IC.pk) the rows of
+	// the earliest registration come first; within a registration, equal
+	// identifiers are adjacent with their earliest occurrence first.  best is
+	// the latest of those earliest occurrences seen so far in the block's
+	// earliest registration; at the last row of the block it is the voter's
+	// final ballot.  Masked rows form the block IC.pk = (0, 0) and carry no
+	// weight.
 
-	/* ======================= Phase 2: Deduplication & Tally ======================= */
-	// We are sorted by (pk_anchor, posReg) ASC.
-	// To keep the *earliest* registration per voter, we keep the FIRST row of each pk_anchor block.
-
-	keepBits := make([]frontend.Variable, n)
+	tally := make([]frontend.Variable, m)
+	for j := range tally {
+		tally[j] = 0
+	}
+	var earliestReg, bestPos frontend.Variable
+	bestChoice := make([]frontend.Variable, m)
 	for i := 0; i < n; i++ {
+		row := sorted[i]
 		if i == 0 {
-			// very first row: always start a new block → keep
-			keepBits[i] = 1
+			earliestReg, bestPos = row.PosReg, row.Pos
+			copy(bestChoice, row.Choice)
 		} else {
-			// compare with previous row (i-1), not next row
-			xPrev := c.SortedByVoterBallots[i-1].PkAnchorX
-			yPrev := c.SortedByVoterBallots[i-1].PkAnchorY
-			xCurr := c.SortedByVoterBallots[i].PkAnchorX
-			yCurr := c.SortedByVoterBallots[i].PkAnchorY
-
-			// pkSame = 1 if same anchor as previous
-			xSame := api.IsZero(api.Sub(xCurr, xPrev))
-			ySame := api.IsZero(api.Sub(yCurr, yPrev))
-			pkSame := api.Mul(xSame, ySame)
-
-			// keep_i = 1 iff this starts a new pk block
-			keepBits[i] = api.Sub(1, pkSame)
+			newVoter := api.Sub(1, samePk[i])
+			first := api.Sub(1, sameKey[i]) // earliest occurrence of its (IC.pk, t_reg, id_B)
+			earliestReg = api.Select(newVoter, row.PosReg, earliestReg)
+			inEarliest := eqBit(api, row.PosReg, earliestReg)
+			later := posCmp.IsLess(bestPos, row.Pos)
+			// take the row at the start of a block, or when it supersedes best
+			take := api.Add(newVoter, api.Mul(samePk[i], boolAll(api, first, inEarliest, later)))
+			bestPos = api.Select(take, row.Pos, bestPos)
+			for j := 0; j < m; j++ {
+				bestChoice[j] = api.Select(take, row.Choice[j], bestChoice[j])
+			}
+		}
+		last := frontend.Variable(1) // last row of its voter's block
+		if i < n-1 {
+			last = api.Sub(1, samePk[i+1])
+		}
+		for j := 0; j < m; j++ {
+			tally[j] = api.Add(tally[j], api.Mul(last, bestChoice[j]))
 		}
 	}
-
-	// Compute tally: T[j] = Σ_i keep_i · A★[i].Choice[j]
-	computedTally := make([]frontend.Variable, numChoices)
-	for j := 0; j < numChoices; j++ {
-		sum := frontend.Variable(0)
-		for i := 0; i < n; i++ {
-			contribution := api.Mul(keepBits[i], c.SortedByVoterBallots[i].Choice[j])
-			sum = api.Add(sum, contribution)
-		}
-		computedTally[j] = sum
+	for j := 0; j < m; j++ {
+		api.AssertIsEqual(tally[j], c.Tally[j])
 	}
-
-	// Assert that computed tally matches the public tally input
-	for j := 0; j < numChoices; j++ {
-		api.AssertIsEqual(computedTally[j], c.Tally[j])
-	}
-
-	// // Optional: Enforce all ballots are valid (disable for soft validation testing)
-	// // Comment out below if you want to allow invalid ballots in the proof:
-	// all := frontend.Variable(1)
-	// for i := 0; i < n; i++ {
-	// 	all = api.Mul(all, c.ValidityBits[i])
-	// }
-	// api.AssertIsEqual(all, 1) // This will fail the proof if ANY ballot is invalid
-
 	return nil
 }

@@ -1,0 +1,213 @@
+=== RUN   TestProverTimePlot
+    castiron_scaling_test.go:74: prep: circuit compile: 379.528006ms (64341 constraints)
+    castiron_scaling_test.go:74: prep: setup: 1.533744697s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1024 attempt=1/5 => 145.656439ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1024 attempt=2/5 => 130.244716ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1024 attempt=3/5 => 136.311618ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1024 attempt=4/5 => 119.303861ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1024 attempt=5/5 => 117.823387ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 727.435927ms (128969 constraints)
+    castiron_scaling_test.go:74: prep: setup: 2.789656484s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1024 attempt=1/5 => 233.093432ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1024 attempt=2/5 => 250.711101ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1024 attempt=3/5 => 240.794272ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1024 attempt=4/5 => 221.850089ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1024 attempt=5/5 => 248.284959ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 1.472261453s (259250 constraints)
+    castiron_scaling_test.go:74: prep: setup: 5.582320877s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1024 attempt=1/5 => 459.876216ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1024 attempt=2/5 => 457.324495ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1024 attempt=3/5 => 432.157333ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1024 attempt=4/5 => 426.900349ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1024 attempt=5/5 => 414.258008ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 3.018187976s (521167 constraints)
+    castiron_scaling_test.go:74: prep: setup: 10.764008601s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1024 attempt=1/5 => 805.748796ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1024 attempt=2/5 => 843.967853ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1024 attempt=3/5 => 773.481036ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1024 attempt=4/5 => 729.960959ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1024 attempt=5/5 => 731.952146ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 5.49446167s (1051152 constraints)
+    castiron_scaling_test.go:74: prep: setup: 22.736445699s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1024 attempt=1/5 => 1.839622549s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1024 attempt=2/5 => 1.541721062s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1024 attempt=3/5 => 1.641710849s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1024 attempt=4/5 => 1.727053714s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1024 attempt=5/5 => 1.541822193s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 12.230917046s (2111947 constraints)
+    castiron_scaling_test.go:74: prep: setup: 44.334298335s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1024 attempt=1/5 => 3.317482006s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1024 attempt=2/5 => 3.011519379s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1024 attempt=3/5 => 2.836326361s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1024 attempt=4/5 => 2.888729429s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1024 attempt=5/5 => 2.899976455s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 23.427042417s (4229853 constraints)
+    castiron_scaling_test.go:74: prep: setup: 1m25.121450485s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1024 attempt=1/5 => 5.640822647s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1024 attempt=2/5 => 5.312533118s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1024 attempt=3/5 => 5.626391651s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1024 attempt=4/5 => 4.975033623s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1024 attempt=5/5 => 5.326192961s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 45.045916369s (8538562 constraints)
+    castiron_scaling_test.go:74: prep: setup: 2m44.89343277s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1024 attempt=1/5 => 9.70768446s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1024 attempt=2/5 => 10.057175985s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1024 attempt=3/5 => 9.076697699s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1024 attempt=4/5 => 9.953944891s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1024 attempt=5/5 => 9.178601147s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 1m31.455602716s (17301776 constraints)
+    castiron_scaling_test.go:74: prep: setup: 5m23.06045652s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1024 attempt=1/5 => 20.431808346s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1024 attempt=2/5 => 20.310695593s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1024 attempt=3/5 => 18.244077153s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1024 attempt=4/5 => 20.860170054s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1024 attempt=5/5 => 18.024484796s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 3m14.857749065s (35119803 constraints)
+    castiron_scaling_test.go:74: prep: setup: 11m3.993408396s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1024 attempt=1/5 => 41.459531595s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1024 attempt=2/5 => 36.526860045s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1024 attempt=3/5 => 39.073237996s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1024 attempt=4/5 => 35.278164477s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1024 attempt=5/5 => 39.413130416s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 325.048545ms (68091 constraints)
+    castiron_scaling_test.go:74: prep: setup: 1.708158113s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1048576 attempt=1/5 => 132.503638ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1048576 attempt=2/5 => 134.27912ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1048576 attempt=3/5 => 129.799321ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1048576 attempt=4/5 => 131.5699ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1048576 attempt=5/5 => 131.878276ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 645.631753ms (136479 constraints)
+    castiron_scaling_test.go:74: prep: setup: 3.06098244s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1048576 attempt=1/5 => 250.561548ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1048576 attempt=2/5 => 240.660119ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1048576 attempt=3/5 => 249.51588ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1048576 attempt=4/5 => 242.784434ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1048576 attempt=5/5 => 251.698954ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 1.66710511s (274280 constraints)
+    castiron_scaling_test.go:74: prep: setup: 6.110585303s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1048576 attempt=1/5 => 507.730692ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1048576 attempt=2/5 => 501.570735ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1048576 attempt=3/5 => 474.517694ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1048576 attempt=4/5 => 492.588643ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1048576 attempt=5/5 => 498.298498ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 3.338209324s (551237 constraints)
+    castiron_scaling_test.go:74: prep: setup: 11.670787822s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1048576 attempt=1/5 => 858.851208ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1048576 attempt=2/5 => 878.659091ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1048576 attempt=3/5 => 913.944798ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1048576 attempt=4/5 => 894.528724ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1048576 attempt=5/5 => 914.340048ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 5.888374796s (1111302 constraints)
+    castiron_scaling_test.go:74: prep: setup: 22.344284663s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1048576 attempt=1/5 => 1.591523617s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1048576 attempt=2/5 => 1.723587813s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1048576 attempt=3/5 => 1.632415919s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1048576 attempt=4/5 => 1.631185805s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1048576 attempt=5/5 => 1.69771354s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 12.549469218s (2232257 constraints)
+    castiron_scaling_test.go:74: prep: setup: 46.43477193s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1048576 attempt=1/5 => 2.897072375s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1048576 attempt=2/5 => 2.855637459s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1048576 attempt=3/5 => 2.923575997s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1048576 attempt=4/5 => 2.778109942s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1048576 attempt=5/5 => 3.012211452s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 24.419787831s (4470483 constraints)
+    castiron_scaling_test.go:74: prep: setup: 1m27.874777674s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1048576 attempt=1/5 => 5.460401388s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1048576 attempt=2/5 => 5.548860253s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1048576 attempt=3/5 => 5.219828456s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1048576 attempt=4/5 => 5.482637735s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1048576 attempt=5/5 => 5.732213133s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 47.911183403s (9019832 constraints)
+    castiron_scaling_test.go:74: prep: setup: 2m49.563962677s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1048576 attempt=1/5 => 10.393813772s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1048576 attempt=2/5 => 9.621363511s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1048576 attempt=3/5 => 10.24201742s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1048576 attempt=4/5 => 10.618717331s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1048576 attempt=5/5 => 8.829459597s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 1m36.142533807s (18264326 constraints)
+    castiron_scaling_test.go:74: prep: setup: 5m32.043081748s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1048576 attempt=1/5 => 20.02111761s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1048576 attempt=2/5 => 20.644705009s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1048576 attempt=3/5 => 18.050229728s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1048576 attempt=4/5 => 20.673089275s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1048576 attempt=5/5 => 17.993468714s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 3m23.865565016s (37044913 constraints)
+    castiron_scaling_test.go:74: prep: setup: 10m59.619985865s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1048576 attempt=1/5 => 40.838209079s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1048576 attempt=2/5 => 37.834212605s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1048576 attempt=3/5 => 39.376993007s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1048576 attempt=4/5 => 36.049750521s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1048576 attempt=5/5 => 39.922292224s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 351.105285ms (71841 constraints)
+    castiron_scaling_test.go:74: prep: setup: 1.661897382s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1073741824 attempt=1/5 => 140.246186ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1073741824 attempt=2/5 => 138.813946ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1073741824 attempt=3/5 => 135.919565ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1073741824 attempt=4/5 => 137.740894ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=1 leaves=1073741824 attempt=5/5 => 132.503057ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 666.195149ms (143989 constraints)
+    castiron_scaling_test.go:74: prep: setup: 3.04414479s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1073741824 attempt=1/5 => 263.521377ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1073741824 attempt=2/5 => 245.740134ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1073741824 attempt=3/5 => 259.641213ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1073741824 attempt=4/5 => 254.122147ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=2 leaves=1073741824 attempt=5/5 => 251.318278ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 1.601586888s (289310 constraints)
+    castiron_scaling_test.go:74: prep: setup: 5.966704299s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1073741824 attempt=1/5 => 520.037535ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1073741824 attempt=2/5 => 489.858403ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1073741824 attempt=3/5 => 485.4304ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1073741824 attempt=4/5 => 494.655769ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=4 leaves=1073741824 attempt=5/5 => 482.185399ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 3.313324266s (581307 constraints)
+    castiron_scaling_test.go:74: prep: setup: 11.512479342s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1073741824 attempt=1/5 => 862.614916ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1073741824 attempt=2/5 => 858.796738ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1073741824 attempt=3/5 => 867.216009ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1073741824 attempt=4/5 => 856.276403ms proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=8 leaves=1073741824 attempt=5/5 => 846.189559ms proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 5.314686064s (1171452 constraints)
+    castiron_scaling_test.go:74: prep: setup: 22.720309724s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1073741824 attempt=1/5 => 1.569904274s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1073741824 attempt=2/5 => 1.608489165s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1073741824 attempt=3/5 => 1.691329869s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1073741824 attempt=4/5 => 1.56402096s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=16 leaves=1073741824 attempt=5/5 => 1.758704389s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 12.147855991s (2352567 constraints)
+    castiron_scaling_test.go:74: prep: setup: 47.913570564s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1073741824 attempt=1/5 => 3.123595953s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1073741824 attempt=2/5 => 3.07952957s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1073741824 attempt=3/5 => 3.143948345s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1073741824 attempt=4/5 => 2.947969294s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=32 leaves=1073741824 attempt=5/5 => 3.039750438s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 24.449591933s (4711113 constraints)
+    castiron_scaling_test.go:74: prep: setup: 1m28.56833487s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1073741824 attempt=1/5 => 5.701967601s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1073741824 attempt=2/5 => 6.042765915s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1073741824 attempt=3/5 => 5.630272044s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1073741824 attempt=4/5 => 5.688083992s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=64 leaves=1073741824 attempt=5/5 => 5.604018546s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 49.913897598s (9501102 constraints)
+    castiron_scaling_test.go:74: prep: setup: 2m54.311251122s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1073741824 attempt=1/5 => 11.244149483s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1073741824 attempt=2/5 => 10.358616458s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1073741824 attempt=3/5 => 10.155785545s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1073741824 attempt=4/5 => 10.38207759s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=128 leaves=1073741824 attempt=5/5 => 10.1217742s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 1m42.917102034s (19226876 constraints)
+    castiron_scaling_test.go:74: prep: setup: 5m42.118456101s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1073741824 attempt=1/5 => 21.358952782s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1073741824 attempt=2/5 => 20.588475396s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1073741824 attempt=3/5 => 18.8058105s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1073741824 attempt=4/5 => 20.030375408s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=256 leaves=1073741824 attempt=5/5 => 19.9333425s proof time
+    castiron_scaling_test.go:74: prep: circuit compile: 3m32.887240467s (38970023 constraints)
+    castiron_scaling_test.go:74: prep: setup: 11m31.674517899s
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1073741824 attempt=1/5 => 42.601919067s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1073741824 attempt=2/5 => 40.256176141s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1073741824 attempt=3/5 => 39.741199824s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1073741824 attempt=4/5 => 39.27721957s proof time
+    castiron_scaling_test.go:80: [groth16/bn254] ballots=512 leaves=1073741824 attempt=5/5 => 41.365636518s proof time
+--- PASS: TestProverTimePlot (6462.59s)
+PASS

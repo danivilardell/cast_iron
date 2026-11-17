@@ -10,8 +10,7 @@
 # Go work/cache
 .gocache/
 
-# Test artifacts
-/prove_err.txt
+# Cached Groth16 keys (CASTIRON_KEYS=keys)
 /cast_iron_prover/keys/
 
 # Local tooling

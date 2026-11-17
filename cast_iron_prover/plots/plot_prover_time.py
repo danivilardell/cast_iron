@@ -31,7 +31,7 @@ def read_csv(path):
             leaves  = int(row["simulated_blockchain_leaves"])
             ballots = int(row["ballots"])
             secs    = float(row["proof_time_seconds"])
-            # optional column: 1 = extrapolated value (see predict_missing.py)
+            # optional column: 1 = extrapolated value (none in the current data)
             pred    = str(row.get("predicted", "0") or "0").strip() == "1"
             by_key[(ballots, leaves, pred)].append(secs)
 
@@ -63,7 +63,7 @@ def make_label(leaves):
     if leaves == -1:
         return "MACI"
     exp = int(round(np.log2(leaves)))
-    return rf"Cast Iron ($\ell=2^{{{exp}}}$)"
+    return rf"Cast Iron ($|T_R|=2^{{{exp}}}$)"   # |T_R|: number of leaves of the record tree
 
 
 def main():

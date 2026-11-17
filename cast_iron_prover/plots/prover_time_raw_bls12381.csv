@@ -1,0 +1,4 @@
+ballots,simulated_blockchain_leaves,proof_attempt,proof_time_seconds,proof_system,constraints,compile_seconds,setup_seconds
+4096,1073741824,1,450.204833,groth16,325926897,1894.8,10327.3
+4096,1073741824,2,397.772513,groth16,325926897,1894.8,10327.3
+4096,1073741824,3,404.620554,groth16,325926897,1894.8,10327.3

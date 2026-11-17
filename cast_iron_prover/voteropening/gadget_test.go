@@ -1,11 +1,13 @@
 package voteropening
 
 import (
+	"encoding/json"
 	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark-crypto/ecc/secp256k1"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
@@ -107,7 +109,7 @@ func TestFixedBaseGadget(t *testing.T) {
 		if c.Sign() == 0 || c.Cmp(n) >= 0 {
 			t.Fatalf("bad test scalar %s", c)
 		}
-		if err := test.IsSolved(circuit, pointAssignment(c, nbBits), ecc.BN254.ScalarField()); err != nil {
+		if err := test.IsSolved(circuit, pointAssignment(c, nbBits), shared.Field); err != nil {
 			t.Fatalf("scalar %s: %v", c.Text(16), err)
 		}
 	}
@@ -115,13 +117,13 @@ func TestFixedBaseGadget(t *testing.T) {
 	{
 		a := pointAssignment(big.NewInt(5), nbBits)
 		a.Bits = bigBits(big.NewInt(6), nbBits)
-		if err := test.IsSolved(circuit, a, ecc.BN254.ScalarField()); err == nil {
+		if err := test.IsSolved(circuit, a, shared.Field); err == nil {
 			t.Fatal("expected failure for wrong point")
 		}
 	}
 	// exceptional scalars: the honest prover hits a 0/0 in the addition formula
 	for _, c := range exc {
-		if err := test.IsSolved(circuit, pointAssignment(c, nbBits), ecc.BN254.ScalarField()); err == nil {
+		if err := test.IsSolved(circuit, pointAssignment(c, nbBits), shared.Field); err == nil {
 			t.Fatalf("exceptional scalar %s unexpectedly solvable", c.Text(16))
 		} else {
 			t.Logf("exceptional scalar %s fails as predicted: %v", c.Text(16), firstLine(err.Error()))
@@ -129,7 +131,7 @@ func TestFixedBaseGadget(t *testing.T) {
 		// neighbours are fine
 		for _, d := range []int64{-1, 1} {
 			cc := new(big.Int).Add(c, big.NewInt(d))
-			if err := test.IsSolved(circuit, pointAssignment(cc, nbBits), ecc.BN254.ScalarField()); err != nil {
+			if err := test.IsSolved(circuit, pointAssignment(cc, nbBits), shared.Field); err != nil {
 				t.Fatalf("neighbour %s of exceptional scalar: %v", cc.Text(16), err)
 			}
 		}
@@ -173,7 +175,9 @@ func (c *openingTestCircuit) Define(api frontend.API) error {
 	if err != nil {
 		return err
 	}
-	api.AssertIsEqual(api.Mul(nonzero, g.XEqualsBit(P, c.RsigHi, c.RsigLo)), c.Ok)
+	hi, lo := g.XHalves(P)
+	same := api.Mul(api.IsZero(api.Sub(hi, c.RsigHi)), api.IsZero(api.Sub(lo, c.RsigLo)))
+	api.AssertIsEqual(api.Mul(nonzero, same), c.Ok)
 	return nil
 }
 
@@ -183,19 +187,19 @@ func TestGadgetMatchesNative(t *testing.T) {
 	o := RandomOpening()
 	circuit := &openingTestCircuit{}
 	good := &openingTestCircuit{Ok: 1, H1: o.H1, H2: o.H2, RsigHi: o.RsigHi, RsigLo: o.RsigLo}
-	if err := test.IsSolved(circuit, good, ecc.BN254.ScalarField()); err != nil {
+	if err := test.IsSolved(circuit, good, shared.Field); err != nil {
 		t.Fatalf("valid opening rejected: %v", err)
 	}
 	bad := &openingTestCircuit{Ok: 1, H1: o.H1, H2: o.H2, RsigHi: o.RsigHi, RsigLo: new(big.Int).Add(o.RsigLo, big.NewInt(1))}
-	if err := test.IsSolved(circuit, bad, ecc.BN254.ScalarField()); err == nil {
+	if err := test.IsSolved(circuit, bad, shared.Field); err == nil {
 		t.Fatal("wrong rσ accepted as valid")
 	}
 	bad.Ok = 0
-	if err := test.IsSolved(circuit, bad, ecc.BN254.ScalarField()); err != nil {
+	if err := test.IsSolved(circuit, bad, shared.Field); err != nil {
 		t.Fatalf("wrong rσ must give Ok = 0: %v", err)
 	}
 	other := &openingTestCircuit{Ok: 1, H1: shared.RandomScalar(), H2: o.H2, RsigHi: o.RsigHi, RsigLo: o.RsigLo}
-	if err := test.IsSolved(circuit, other, ecc.BN254.ScalarField()); err == nil {
+	if err := test.IsSolved(circuit, other, shared.Field); err == nil {
 		t.Fatal("wrong hash accepted as valid")
 	}
 }
@@ -217,5 +221,62 @@ func TestNativeECDSA(t *testing.T) {
 	}
 	if r.Cmp(o.Rsig) != 0 {
 		t.Fatalf("r-component %s != x([c]G) %s", r.Text(16), o.Rsig.Text(16))
+	}
+}
+
+// TestMatchesPythonClient replays the cross-language vectors of the Python
+// CTC client (ctc/tests/vectors.json): the Poseidon2 hash, the nonce
+// derivation and the record-tree leaf must agree in both implementations, or
+// registrations made with the client could not be opened by the circuit.
+func TestMatchesPythonClient(t *testing.T) {
+	if shared.Curve.Name != "bn254" {
+		t.Skip("the Python client hashes over the BN254 scalar field")
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "ctc", "tests", "vectors.json"))
+	if err != nil {
+		t.Skip("ctc/tests/vectors.json not found:", err)
+	}
+	var vec struct {
+		PoseidonMD []struct {
+			In  []string `json:"in"`
+			Out string   `json:"out"`
+		} `json:"poseidon_md"`
+		Openings []map[string]string `json:"openings"`
+	}
+	if err := json.Unmarshal(raw, &vec); err != nil {
+		t.Fatal(err)
+	}
+	big10 := func(s string) *big.Int {
+		v, ok := new(big.Int).SetString(s, 10)
+		if !ok {
+			t.Fatalf("bad integer %q", s)
+		}
+		return v
+	}
+	if len(vec.PoseidonMD) == 0 || len(vec.Openings) == 0 {
+		t.Fatal("no vectors")
+	}
+	for i, v := range vec.PoseidonMD {
+		in := make([]*big.Int, len(v.In))
+		for j := range v.In {
+			in[j] = big10(v.In[j])
+		}
+		if got := shared.PoseidonMD(in...); got.Cmp(big10(v.Out)) != 0 {
+			t.Fatalf("poseidon_md[%d]: got %s, want %s", i, got, v.Out)
+		}
+	}
+	for i, v := range vec.Openings {
+		o, err := ComputeOpening(big10(v["rx"]), big10(v["ry"]), big10(v["s"]), big10(v["r"]))
+		if err != nil {
+			t.Fatalf("openings[%d]: %v", i, err)
+		}
+		for name, got := range map[string]*big.Int{"h1": o.H1, "h2": o.H2, "c": o.C, "rsig": o.Rsig, "rsig_hi": o.RsigHi, "rsig_lo": o.RsigLo} {
+			if got.Cmp(big10(v[name])) != 0 {
+				t.Fatalf("openings[%d].%s: got %s, want %s", i, name, got, v[name])
+			}
+		}
+		if got := shared.EntryCommitmentNative(big10(v["pos"]), o.RsigHi, o.RsigLo); got.Cmp(big10(v["leaf"])) != 0 {
+			t.Fatalf("openings[%d].leaf: got %s, want %s", i, got, v["leaf"])
+		}
 	}
 }

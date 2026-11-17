@@ -1,3 +1,11 @@
+"""Figure 7: Cast Iron's normalised CoCo as a function of the anonymity-set
+size (cover traffic within the registration window), CoCo = sqrt(2*pi*lambda)
+(paper Appendix B).  Closed form, no simulation.
+
+    uv run python anonymity_set_curve.py     # -> figures/coco_curve.{pdf,png}
+"""
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -52,5 +60,6 @@ ax.spines['top'].set_visible(False)
 ax.spines['right'].set_visible(False)
 
 fig.tight_layout()
-fig.savefig('coco_curve.pdf', bbox_inches='tight')
-fig.savefig('coco_curve.png', dpi=300, bbox_inches='tight')
+os.makedirs('figures', exist_ok=True)
+fig.savefig('figures/coco_curve.pdf', bbox_inches='tight')
+fig.savefig('figures/coco_curve.png', dpi=300, bbox_inches='tight')

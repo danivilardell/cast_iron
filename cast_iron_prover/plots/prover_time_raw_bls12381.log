@@ -1,0 +1,8 @@
+=== RUN   TestProverTimePlot
+    castiron_scaling_test.go:74: prep: circuit compile: 31m34.845570761s (325926897 constraints)
+    castiron_scaling_test.go:74: prep: setup: 2h52m7.314239718s
+    castiron_scaling_test.go:80: [groth16/bls12381] ballots=4096 leaves=1073741824 attempt=1/3 => 7m30.204832882s proof time
+    castiron_scaling_test.go:80: [groth16/bls12381] ballots=4096 leaves=1073741824 attempt=2/3 => 6m37.772513402s proof time
+    castiron_scaling_test.go:80: [groth16/bls12381] ballots=4096 leaves=1073741824 attempt=3/3 => 6m44.620554374s proof time
+--- PASS: TestProverTimePlot (13484.25s)
+PASS

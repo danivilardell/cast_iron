@@ -17,39 +17,48 @@ import (
 var ErrResample = errors.New("voteropening: resample commitment randomness")
 
 // Opening is everything the registration client derives for one covert
-// registration: the nonce c = H(σreg ∥ r) and rσ = x([c]G), the ECDSA
+// registration: the nonce c = H(m ∥ r) and rσ = x([c]G), the ECDSA
 // r-component of the registration transaction that the tallying circuit
 // checks against the record tree (castiron_circuit.go, registrationOpeningBit).
 type Opening struct {
-	SigRx, SigRy, SigS *big.Int // σreg (ballot component B3)
-	R                  *big.Int // commitment randomness
+	Msg []*big.Int // committed message m as field elements
+	R   *big.Int   // commitment randomness
 
-	HSig   *big.Int           // Poseidon(σreg): the chaining state the circuit continues from
-	H1, H2 *big.Int           // Poseidon(σreg ∥ r), Poseidon(σreg ∥ r ∥ WideHashTag)
-	C      *big.Int           // nonce c = (H1·2^254 + H2) mod n ∈ [1, n-1]
+	// σreg when the opening was built by ComputeOpening (m = σreg).
+	SigRx, SigRy, SigS *big.Int
+
+	H1, H2 *big.Int           // Poseidon(m ∥ r), Poseidon(m ∥ r ∥ WideHashTag)
+	C      *big.Int           // nonce c = (H1·2^k + H2) mod n ∈ [1, n-1]
 	Point  secp256k1.G1Affine // [c]G
 	Rsig   *big.Int           // x([c]G) < n
-	RsigHi *big.Int           // Rsig = RsigHi·2^128 + RsigLo, the witness form used in-circuit
+	RsigHi *big.Int           // Rsig = RsigHi·2^128 + RsigLo, the form committed in the record tree
 	RsigLo *big.Int
 }
 
-// NonceFromHashes derives the nonce c = (h1·2^254 + h2) mod n from the two
-// Poseidon outputs (the native form of FixedBaseGadget.NonceBitsWide).  The
-// 508-bit value reduced mod n is within 2^-252 of uniform on [0, n).
+// NonceFromHashes derives the nonce c = (h1·2^k + h2) mod n from the two
+// Poseidon outputs, k the bit length of the proving field (254 on BN254; the
+// native form of FixedBaseGadget.NonceBitsWide).  The ≥508-bit value reduced
+// mod n is within 2^-252 of uniform on [0, n).
 func NonceFromHashes(h1, h2 *big.Int) *big.Int {
-	c := new(big.Int).Lsh(h1, frBits)
+	c := new(big.Int).Lsh(h1, uint(shared.Field.BitLen()))
 	c.Add(c, h2)
 	return c.Mod(c, secpOrder)
 }
 
-// ComputeOpening is the registration client's side of the relation: it derives
-// the nonce and rσ from σreg and the commitment randomness r, hashing exactly
-// like the tallying circuit (Merkle–Damgård Poseidon2 continued from
-// Poseidon(σreg), see shared.NewPoseidonHasherFromState).
-func ComputeOpening(sigRx, sigRy, sigS, r *big.Int) (*Opening, error) {
-	hSig := shared.PoseidonMD(sigRx, sigRy, sigS)
-	h1 := shared.PoseidonMD(sigRx, sigRy, sigS, r)
-	h2 := shared.PoseidonMD(sigRx, sigRy, sigS, r, big.NewInt(WideHashTag))
+// RegistrationMessage is the message a Cast Iron registration commits to,
+// m = (pk_i, σreg) (paper Section 5.1), as the field elements the circuit
+// hashes: the voting key's coordinates followed by σreg = (R.x, R.y, S).
+func RegistrationMessage(pkX, pkY, sigRx, sigRy, sigS *big.Int) []*big.Int {
+	return []*big.Int{pkX, pkY, sigRx, sigRy, sigS}
+}
+
+// ComputeOpeningMsg is the registration client's side of the relation: it
+// derives the nonce and rσ from the message m (field elements) and the
+// commitment randomness r, hashing exactly like the tallying circuit.
+func ComputeOpeningMsg(msg []*big.Int, r *big.Int) (*Opening, error) {
+	in := append(append([]*big.Int{}, msg...), r)
+	h1 := shared.PoseidonMD(in...)
+	h2 := shared.PoseidonMD(append(in, big.NewInt(WideHashTag))...)
 	c := NonceFromHashes(h1, h2)
 	if c.Sign() == 0 {
 		return nil, ErrResample
@@ -61,10 +70,20 @@ func ComputeOpening(sigRx, sigRy, sigS, r *big.Int) (*Opening, error) {
 		return nil, ErrResample
 	}
 	hi, lo := split128(x)
-	return &Opening{
-		SigRx: sigRx, SigRy: sigRy, SigS: sigS, R: r,
-		HSig: hSig, H1: h1, H2: h2, C: c, Point: P, Rsig: x, RsigHi: hi, RsigLo: lo,
-	}, nil
+	return &Opening{Msg: msg, R: r, H1: h1, H2: h2, C: c, Point: P, Rsig: x, RsigHi: hi, RsigLo: lo}, nil
+}
+
+// ComputeOpening is ComputeOpeningMsg for the three-element message
+// m = σreg = (R.x, R.y, S).  The tallying circuit commits to (pk_i, σreg)
+// (RegistrationMessage); this form is kept for the cross-language test
+// vectors of ctc/tests/gen_vectors.
+func ComputeOpening(sigRx, sigRy, sigS, r *big.Int) (*Opening, error) {
+	o, err := ComputeOpeningMsg([]*big.Int{sigRx, sigRy, sigS}, r)
+	if err != nil {
+		return nil, err
+	}
+	o.SigRx, o.SigRy, o.SigS = sigRx, sigRy, sigS
+	return o, nil
 }
 
 func split128(x *big.Int) (hi, lo *big.Int) {
@@ -74,10 +93,12 @@ func split128(x *big.Int) (hi, lo *big.Int) {
 	return hi, lo
 }
 
-// RandomOpening builds an opening from random inputs (resampling r if needed).
+// RandomOpening builds an opening of a random registration message
+// (resampling r if needed).
 func RandomOpening() *Opening {
+	msg := RegistrationMessage(shared.RandomScalar(), shared.RandomScalar(), shared.RandomScalar(), shared.RandomScalar(), shared.RandomScalar())
 	for {
-		o, err := ComputeOpening(shared.RandomScalar(), shared.RandomScalar(), shared.RandomScalar(), shared.RandomScalar())
+		o, err := ComputeOpeningMsg(msg, shared.RandomScalar())
 		if err == nil {
 			return o
 		}

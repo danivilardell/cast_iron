@@ -16,7 +16,7 @@ pnpm install --frozen-lockfile
 pnpm exec lerna run build --scope @maci-protocol/core --include-dependencies
 pnpm exec ts-node ./.github/scripts/downloadZkeys.ts test ./zkeys_test
 mkdir bench && cp <this directory>/*.js <this directory>/run_sweep.sh bench/
-bash bench/run_sweep.sh          # COUNTS="1 2 4 8 16 32 64 128" REPEATS=5 by default
+bash bench/run_sweep.sh          # COUNTS="1 2 4 8 16 32 64 128" REPEATS=5 by default; Figure 4 uses COUNTS up to 512
 ```
 
 * `gen_inputs.js` builds a poll with `n` voters (one valid vote message each)
